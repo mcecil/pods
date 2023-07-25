@@ -1,0 +1,1019 @@
+---
+title: "Pod work"
+author: "Mike Cecil"
+date: "2023-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(dplyr)
+#library(randomForest)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(Rcpp)
+library(phenofit)
+library(zoo)
+library(here)
+library(terra)
+```
+
+## Load data
+
+
+```{r pressure, echo=FALSE}
+data <- read.csv(here("data/all_joined.csv"))
+data$date <- as_date(data$date)
+
+all_sites <- read.csv(here("data/all_pod_locations_o.csv"))
+```
+
+## Add DEA S2 data (SSA sites)
+
+```{r}
+dea_s2_bands <- c("B01", "B02", "B03", "B04", "B05", "B06",
+                  "B07", "B08", "B8A", "B09", "B11", "B12",
+                  "AOT", "WVP", "SCL")
+
+s2_files <- list.files(here('data/dea_s2/'),
+                       pattern = '.tif')
+
+
+for (band in dea_s2_bands){
+  data[[paste0('DEA_s2_', band)]] <- NA
+}
+
+
+for (k in 1:length(s2_files) ){
+  if((k %% 100) == 0){
+    print(k)
+  }
+  s2_file <- s2_files[k]
+  site_name <- substr(s2_file, 1, nchar(s2_file) - 15)
+  image_date <- as.Date(substr(s2_file, nchar(s2_file) - 13, nchar(s2_file)-4))
+  s <- rast(paste0(here('data/dea_s2/'), '/',
+                    s2_file))
+  names(s) <- dea_s2_bands
+  long <- all_sites %>% filter(Location == site_name) %>% pull(lon) %>% first()
+  lat <- all_sites %>% filter(Location == site_name) %>% pull(lat) %>% first()
+  
+  point <- cbind(long, lat) %>% vect() # Replace lon and lat with your point coordinates
+  crs(point) <- "+proj=longlat +datum=WGS84"  # Specify the correct projection
+  point_proj <- project(point, crs(s))
+
+  vals <- terra::extract(s, point_proj)
+
+  index <- which(data$Location == site_name & data$date == image_date)
+  for (band in names(s)){
+    data[[index, paste0('DEA_s2_', band)]] <- vals[[band]]
+  }
+}
+
+save(data, file = here('data/data_s2_dea.rda'))
+```
+
+
+## Add GEE S1 data - Ascending (all sites)
+
+```{r}
+load(file = here('data/data_s2_dea.rda'))
+
+### guided filter (gf) lasso processing  - GEE
+data[[paste0('GEE_s1_A_vh_gf')]] <- NA
+data[[paste0('GEE_s1_A_vv_gf')]] <- NA
+
+
+base_folder <- here('data/s1_batch_A/s1_batch_A/')
+site_folders <- list.files(base_folder,
+                           full.names = F)
+
+band_name <- 'vh_gf'
+for(j in 1:length(site_folders)){
+  site_folder <- site_folders[j]
+  print(site_folder)
+  image_folder <- paste0(base_folder, '/', site_folder, '/s1_gf/')
+  s1_files <- list.files(image_folder, pattern = "VH_lasso.tif")
+  site_name <- site_folder
+  for (k in 1:length(s1_files) ){
+    s1_file <- s1_files[k]
+    # site_name <- substr(s1_file, 1, nchar(s1_file) - 24)
+    image_date <- as.Date(substr(s1_file, 18, 25), format = '%Y%m%d')
+    s <- rast(paste0(image_folder, '/',
+                     s1_file))
+    names(s) <- band_name
+    long <- all_sites %>% filter(Location == site_name) %>% pull(lon) %>% first()
+    lat <- all_sites %>% filter(Location == site_name) %>% pull(lat) %>% first()
+    
+    point <- cbind(long, lat) %>% vect() # Replace lon and lat with your point coordinates
+    crs(point) <- "+proj=longlat +datum=WGS84"  # Specify the correct projection
+    point_proj <- project(point, crs(s))
+    # point_proj_buffer <- buffer(point_proj, 50)
+    
+    vals <- terra::extract(s, point_proj)
+    # vals <- terra::extract(s, point_proj_buffer, fun = 'median')
+    
+    index <- which(data$Location == site_name & data$date == image_date)
+    data[[index, paste0('GEE_s1_A_', band_name)]] <- vals[[band_name]]
+  }
+}
+
+band_name <- 'vv_gf'
+for(j in 1:length(site_folders)){
+  site_folder <- site_folders[j]
+  print(site_folder)
+  image_folder <- paste0(base_folder, '/', site_folder, '/s1_gf/')
+  s1_files <- list.files(image_folder, pattern = "VV_lasso.tif")
+  site_name <- site_folder
+  for (k in 1:length(s1_files) ){
+    s1_file <- s1_files[k]
+    # site_name <- substr(s1_file, 1, nchar(s1_file) - 24)
+    image_date <- as.Date(substr(s1_file, 18, 25), format = '%Y%m%d')
+    s <- rast(paste0(image_folder, '/',
+                     s1_file))
+    names(s) <- band_name
+    long <- all_sites %>% filter(Location == site_name) %>% pull(lon) %>% first()
+    lat <- all_sites %>% filter(Location == site_name) %>% pull(lat) %>% first()
+    
+    point <- cbind(long, lat) %>% vect() # Replace lon and lat with your point coordinates
+    crs(point) <- "+proj=longlat +datum=WGS84"  # Specify the correct projection
+    point_proj <- project(point, crs(s))
+    # point_proj_buffer <- buffer(point_proj, 50)
+    
+    vals <- terra::extract(s, point_proj)
+    # vals <- terra::extract(s, point_proj_buffer, fun = 'median')
+    
+    index <- which(data$Location == site_name & data$date == image_date)
+    data[[index, paste0('GEE_s1_A_', band_name)]] <- vals[[band_name]]
+  }
+}
+
+save(data, file = here('data/data_s1_A.rda'))
+```
+
+## Add GEE S1 data - Descending (all sites)
+
+
+```{r}
+load(file = here('data/data_s1_A.rda'))
+
+### guided filter (gf) lasso processing  - GEE
+data[[paste0('GEE_s1_D_vh_gf')]] <- NA
+data[[paste0('GEE_s1_D_vv_gf')]] <- NA
+
+
+base_folder <- here('data/s1_batch_D/s1_batch_D/')
+site_folders <- list.files(base_folder,
+                           full.names = F)
+
+band_name <- 'vh_gf'
+for(j in 1:length(site_folders)){
+  site_folder <- site_folders[j]
+  print(site_folder)
+  image_folder <- paste0(base_folder, '/', site_folder, '/s1_gf/')
+  s1_files <- list.files(image_folder, pattern = "VH_lasso.tif")
+  site_name <- site_folder
+  for (k in 1:length(s1_files) ){
+    s1_file <- s1_files[k]
+    # site_name <- substr(s1_file, 1, nchar(s1_file) - 24)
+    image_date <- as.Date(substr(s1_file, 18, 25), format = '%Y%m%d')
+    s <- rast(paste0(image_folder, '/',
+                     s1_file))
+    names(s) <- band_name
+    long <- all_sites %>% filter(Location == site_name) %>% pull(lon) %>% first()
+    lat <- all_sites %>% filter(Location == site_name) %>% pull(lat) %>% first()
+    
+    point <- cbind(long, lat) %>% vect() # Replace lon and lat with your point coordinates
+    crs(point) <- "+proj=longlat +datum=WGS84"  # Specify the correct projection
+    point_proj <- project(point, crs(s))
+    # point_proj_buffer <- buffer(point_proj, 50)
+    
+    vals <- terra::extract(s, point_proj)
+    # vals <- terra::extract(s, point_proj_buffer, fun = 'median')
+    
+    index <- which(data$Location == site_name & data$date == image_date)
+    data[[index, paste0('GEE_s1_D_', band_name)]] <- vals[[band_name]]
+  }
+}
+
+band_name <- 'vv_gf'
+for(j in 1:length(site_folders)){
+  site_folder <- site_folders[j]
+  print(site_folder)
+  image_folder <- paste0(base_folder, '/', site_folder, '/s1_gf/')
+  s1_files <- list.files(image_folder, pattern = "VV_lasso.tif")
+  site_name <- site_folder
+  for (k in 1:length(s1_files) ){
+    s1_file <- s1_files[k]
+    # site_name <- substr(s1_file, 1, nchar(s1_file) - 24)
+    image_date <- as.Date(substr(s1_file, 18, 25), format = '%Y%m%d')
+    s <- rast(paste0(image_folder, '/',
+                     s1_file))
+    names(s) <- band_name
+    long <- all_sites %>% filter(Location == site_name) %>% pull(lon) %>% first()
+    lat <- all_sites %>% filter(Location == site_name) %>% pull(lat) %>% first()
+    
+    point <- cbind(long, lat) %>% vect() # Replace lon and lat with your point coordinates
+    crs(point) <- "+proj=longlat +datum=WGS84"  # Specify the correct projection
+    point_proj <- project(point, crs(s))
+    # point_proj_buffer <- buffer(point_proj, 50)
+    
+    vals <- terra::extract(s, point_proj)
+    # vals <- terra::extract(s, point_proj_buffer, fun = 'median')
+    
+    index <- which(data$Location == site_name & data$date == image_date)
+    data[[index, paste0('GEE_s1_D_', band_name)]] <- vals[[band_name]]
+  }
+}
+
+save(data, file = here('data/data_s1_D.rda'))
+```
+
+## remove Planet non-corn sites
+```{r}
+
+load(file = here('data/data_s1_D.rda'))
+
+
+all_site_names <- unique(data$Location)
+planet_all_sites <- all_site_names[grep('planet_', all_site_names)]
+  
+planet_corn_sites <- c("C004194",
+                  "C003923",
+                  "C004201",
+                  "C003942",
+                  "C003942",
+                  "C004256",
+                  "C004140",
+                  "C004334",
+                  "C003757",
+                  "C003794",
+                  "C004347",
+                  "C003897",
+                  "C003755",
+                  "C003310",
+                  "C004290",
+                  "C003944",
+                  "C003781",
+                  "C003614",
+                  "C003849",
+                  "C003957",
+                  "C003939",
+                  "C003938",
+                  "C003824",
+                  "C003924",
+                  "C003961",
+                  "C003725",
+                  "C004344",
+                  "C003911",
+                  "C003165",
+                  "C003214",
+                  "C003873",
+                  "C003819",
+                  "C003341",
+                  "C003363",
+                  "C003366",
+                  "C003142",
+                  "C003290",
+                  "C003060",
+                  "C004349",
+                  "C003960",
+                  "C004336",
+                  "C004182",
+                  "C004115",
+                  "C004115",
+                  "C003919",
+                  "C003257",
+                  "C003179",
+                  "C003415",
+                  "C004345",
+                  "C003129",
+                  "C003136",
+                  "C003151",
+                  "C003208",
+                  "C003002",
+                  "C003344",
+                  "C004342",
+                  "C003963",
+                  "C004318",
+                  "C003771") %>% paste0('planet_', .)
+
+planet_corn_sites_one_string <- str_flatten(planet_corn_sites, collapse = ' ')
+
+planet_good_sites_L <- sapply(planet_all_sites, function(x){
+  l <- grepl(x, planet_corn_sites_one_string)
+})
+planet_bad_sites <- planet_all_sites[planet_good_sites_L == F]
+
+data <- data[!(data$Location %in% planet_bad_sites), ]
+all_sites <- all_sites[!(all_sites$Location %in% planet_bad_sites), ]
+```
+
+
+## Kenya split
+
+```{r}
+fit_var <- function(df, colName, lambda, w_colName = NA, weights = F){
+  fitted_vi_col_name <- paste0(colName, "_fitted")
+  y_all <- df[[colName]] 
+  #  print(y_all)
+  y_all[is.na(y_all)] <- -9999
+  if(weights == T ){
+    w <- df[[w_colName]]
+  } else {
+    w <- (y_all != -9999)
+  }
+  y_whit <- whit2(y_all, lambda, w)
+  #  print(y_whit)
+  df[[fitted_vi_col_name]] <- y_whit
+  return(df)
+}
+```
+
+```{r}
+all_sites$start_date <- as_date(all_sites$start_date, format = '%m/%d/%Y')
+all_sites$end_date <- as_date(all_sites$end_date, format = '%m/%d/%Y')
+```
+
+
+
+
+```{r}
+library(scorepeak)
+
+kenya_sites <- all_sites %>% filter(grepl('kenya', Location))
+dorm <- 0.20
+lag <- 14
+pad <- 30
+pdf('kenya_plots.pdf')
+for (k in 1:NROW(kenya_sites )){
+  alert <- ""
+  location <- kenya_sites$Location[k]
+  test_site_data <- data %>% filter(Location == location) 
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+  print(location)
+  test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
+  
+  min_ndvi_date <- min(test_site_data_ndvi_valid$date)
+  max_ndvi_date <- max(test_site_data_ndvi_valid$date)
+  
+  min_valid_date <- min_ndvi_date - lag - pad
+  max_valid_date <- max_ndvi_date + lag + pad
+  test_site_data <- test_site_data %>% filter(date >= min_valid_date) %>% filter(date <= max_valid_date)
+  
+  ##fill before dates
+  dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  ##fill after dates
+  dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+  test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  ## Whittaker smooth
+  lambda <- 10000
+  test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
+  
+  # ## Beck fit
+  finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
+  models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck)
+  dates_mark <- test_site_data$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  # ndvi_beck <- finefit_mark$zs$iter2
+  # test_site_data$ndvi_beck <- ndvi_beck
+  
+  window_size <- 91
+  # maxima_indices <- which(detect_localmaxima(test_site_data$ndvi_pad_fitted, w = window_size))
+  # maxima_dates <- test_site_data$date[maxima_indices]
+  # maxima_ndvis <- test_site_data$ndvi_pad_fitted[maxima_indices]
+  # 
+  minima_indices <- which(detect_localmaxima(-test_site_data$ndvi_pad_fitted, w = window_size))
+  minima_dates <- test_site_data$date[minima_indices]
+  minima_ndvis <- test_site_data$ndvi_pad_fitted[minima_indices]
+  
+  # high_max_i <- which(maxima_ndvis > 0.5)
+  # high_max_count <- length(high_max_i)
+  # high_max_min_date <- min(maxima_dates[high_max_i])
+  # high_max_max_date <- max(maxima_dates[high_max_i])
+  # 
+  # low_min_i <- which(minima_ndvis <= 0.55)
+  # low_min_date_i <- which((minima_dates <= high_max_max_date) &
+  #                           (minima_dates >= high_max_min_date))
+  # low_min_btwn_i <- intersect(low_min_i, low_min_date_i)
+  # low_min_count <- length(low_min_btwn_i)
+  
+ # data$high_max_count[k] <- high_max_count
+#  data$low_min_count[k] <- low_min_count
+  
+  p <- ggplot(test_site_data) +
+    geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+    geom_point(aes(x = date, y = ndvi), col = 'red') +
+    
+    geom_line(aes(x = date, y = ndvi_pad_fitted)) +
+   # geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    theme_bw() +
+    ylim(0,1) + 
+    #   geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") + 
+    #  geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") + 
+    #  geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") + 
+    #  geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") + 
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+    geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(alert, location, ' ', dates_collapse_mark))
+  plot(p)
+  
+  ## create new per-season data frames
+  for (j in (seq(1, length(minima_dates) - 1)) ){
+    season_name <- paste0(location, "_", j)
+    pod_start <- minima_dates[j]
+    pod_end <- minima_dates[j + 1] 
+    season_start <- minima_dates[j] - lag - pad
+    season_end <- minima_dates[j + 1] + lag + pad
+    new_site_data <- test_site_data %>%
+      filter(date >= season_start) %>%
+      filter(date <= season_end)
+    ## set pod data before and after season splits to NA
+    new_site_data[new_site_data$date < pod_start, "ndvi"] <- NA
+    new_site_data[new_site_data$date > pod_end, "ndvi"] <- NA
+    new_site_data$Location <- season_name
+    p1 <- ggplot(new_site_data) +
+      geom_point(aes(x = date, y = ndvi)) + ggtitle(season_name)
+    plot(p1)
+    ## add to main df
+    data <- bind_rows(data, new_site_data)
+    
+    ## add to all_sites
+    new_row <- all_sites %>% filter(Location == location)
+    new_row$Location <- season_name
+    new_row$start_date <- season_start
+    new_row$end_date <- season_end
+    all_sites <- bind_rows(all_sites, new_row)
+
+    
+    
+  }
+  ##update main df
+  data <- data %>% filter(Location != location)
+  all_sites <- all_sites %>% filter(Location != location)
+
+}
+dev.off()
+
+
+
+```
+
+
+## Determine season validity (pods)
+- this is needed to determine dormancy values
+
+```{r}
+pdf('season_check.pdf')
+for(k in 1:NROW(all_sites)){
+  current_site <- all_sites$Location[k]
+  start_date <- all_sites$start_date[k]
+  end_date <- all_sites$end_date[k]
+  site_data <- data %>% 
+    filter(Location == current_site) %>%
+    filter(date >= start_date) %>% 
+    filter(date <= end_date)
+  p <- ggplot(site_data) +
+    geom_point(aes(x = date, y = ndvi), col = 'red') +
+    geom_vline(xintercept = start_date, linetype = 'solid', color = 'purple', lwd = 2 ) + 
+    geom_vline(xintercept = end_date, linetype = 'solid', color = 'purple', lwd = 2) +
+    ggtitle(paste(current_site, start_date, end_date, sep = ' '))
+    theme_bw()
+  plot(p)
+  
+}
+dev.off()
+```
+
+Write to csv, then manually interpret plots
+```{r}
+all_sites$valid_season <- ""
+write.csv(all_sites, file = 'all_sites.csv')
+```
+
+
+Reimport csv.
+
+'valid_season' columns lists manual interpretation of season
+- 'Y' for close to full season
+- 'N' for incomplete seasons
+- 'discard' for gibberish, to remove.
+```{r}
+all_sites <- read.csv('all_sites.csv')
+all_sites$start_date <- as_date(all_sites$start_date)
+all_sites$end_date <- as_date(all_sites$end_date)
+```
+
+
+
+
+- subdivide Planet groups
+```{r}
+stockton_sites <- c('planet_C004318', 'planet_C003771')
+lincoln_sites <- c("planet_C004194",
+"planet_C003923",
+"planet_C004201",
+"planet_C003942",
+"planet_C004256"
+)
+
+nplatte_sites <- c("planet_C003961",
+"planet_C003725",
+"planet_C004344",
+"planet_C003911",
+"planet_C003165",
+# "planet_C003214",
+"planet_C003873",
+"planet_C003819",
+"planet_C003341",
+"planet_C003363",
+"planet_C003366",
+"planet_C003142",
+"planet_C003290",
+"planet_C003060",
+"planet_C004349",
+"planet_C003960",
+"planet_C004336",
+"planet_C004182",
+"planet_C004115",
+"planet_C004115",
+"planet_C003919",
+"planet_C003257",
+"planet_C003179",
+"planet_C003415",
+"planet_C004345",
+"planet_C003129",
+"planet_C003136",
+"planet_C003151",
+"planet_C003208",
+"planet_C003002",
+"planet_C003344",
+"planet_C004342",
+"planet_C003963"
+)
+
+all_sites[all_sites$Location %in% stockton_sites, 'Group'] <- 'planet_stockton'
+all_sites[all_sites$Location %in% lincoln_sites, 'Group'] <- 'planet_lincoln'
+all_sites[all_sites$Location %in% nplatte_sites, 'Group'] <- 'planet_nplatte'
+
+data[data$Location %in% stockton_sites, 'group_id'] <- 'planet_stockton'
+data[data$Location %in% lincoln_sites, 'group_id'] <- 'planet_lincoln'
+data[data$Location %in% nplatte_sites, 'group_id'] <- 'planet_nplatte'
+
+
+
+
+```
+
+## dormancy (calculate for different VI's)
+
+
+
+
+```{r}
+
+all_sites_full <- all_sites %>% filter(valid_season == 'Y')
+
+## determine dormancy value
+
+pdf('dormancy_plots.pdf')
+
+for (k in 1:NROW(all_sites_full)){
+  location <- all_sites_full$Location[k]
+  test_site_data <- data %>% filter(Location == location) %>% filter (!is.na(ndvi))
+  print(location)
+  min_ndvi <- min(test_site_data$ndvi, na.rm = T)
+  ndvi_10 <- quantile(test_site_data$ndvi, 0.10, na.rm = T)
+  gcvi_10 <- quantile(test_site_data$gcvi, 0.10, na.rm = T)
+  evi_10 <- quantile(test_site_data$evi2, 0.10, na.rm = T)
+  savi_10 <- quantile(test_site_data$savi, 0.10, na.rm = T)
+
+  
+  
+  
+  group <- data %>% filter(group_id != '') %>% filter(Location == location) %>% pull(group_id) %>% first()
+  
+
+  p <- ggplot(test_site_data) +
+    geom_point(aes(x = date, y = ndvi)) +
+    theme_bw() +
+    ylim(0,1) + 
+    geom_hline(yintercept= min_ndvi, linetype="dashed", color = "red") + 
+    geom_hline(yintercept= ndvi_10, linetype="dashed", color = "blue") + 
+    ggtitle(paste0(location, ' ', min_ndvi, ' ', ndvi_10))
+  plot(p)
+  
+  
+  all_sites_full$min_ndvi[k] <- min_ndvi
+  all_sites_full$ndvi_10[k] <- ndvi_10
+  all_sites_full$evi_10[k] <- evi_10
+  all_sites_full$gcvi_10[k] <- gcvi_10
+  all_sites_full$savi_10[k] <- savi_10
+
+  all_sites_full$group[k] <- group
+}
+dev.off()
+
+
+
+```
+
+
+```{r}
+groups <- unique(all_sites_full$group)
+group_df <- data.frame("group" = groups)
+group
+
+group_df$median_ndvi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$ndvi_10)
+  return(a)
+})
+
+group_df$median_evi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$evi_10)
+  return(a)
+})
+
+group_df$median_savi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$savi_10)
+  return(a)
+})
+
+group_df$median_gcvi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$gcvi_10)
+  return(a)
+})
+
+group_df
+
+```
+
+
+
+## pod pheno extraction
+-determine dates of min VI for clipping season
+```{r}
+
+pdf('padding_labmdas.pdf')
+for (k in 1:NROW(all_sites)){
+  location <- all_sites$Location[k]
+  test_site_data <- data %>% filter(Location == location) 
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+  print(location)
+  test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
+  lat <- median(test_site_data_ndvi_valid$lat, na.rm = T)
+  long <- median(test_site_data_ndvi_valid$long, na.rm = T)
+  all_sites$lat[k] <- lat
+  all_sites$long[k] <- long
+  
+  min_ndvi_date <- min(test_site_data_ndvi_valid$date)
+  max_ndvi_date <- max(test_site_data_ndvi_valid$date)
+  
+  min_valid_date <- min_ndvi_date - lag - pad
+  max_valid_date <- max_ndvi_date + lag + pad
+  test_site_data <- test_site_data %>% filter(date >= min_valid_date) %>% filter(date <= max_valid_date)
+  
+  # weight
+    
+  test_site_data$w <- -9999
+  test_site_data[!is.na(test_site_data$ndvi), 'w'] <- 1
+  
+  
+  ##fill before dates
+  dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+
+  ##fill after dates
+  dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+  test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+
+  
+  ## Whittaker smooth
+  #lambdas <- c(10, 100, 1000, 10000)
+  lambdas <- c(1000)
+  for (lambda in lambdas){
+    test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
+    window_size <- 31
+    maxima_indices <- which(detect_localmaxima(test_site_data$ndvi_pad_fitted, w = window_size))
+    maxima_dates <- test_site_data$date[maxima_indices]
+    maxima_ndvis <- test_site_data$ndvi_pad_fitted[maxima_indices]
+    
+    minima_indices <- which(detect_localmaxima(-test_site_data$ndvi_pad_fitted, w = window_size))
+    minima_dates <- test_site_data$date[minima_indices]
+    minima_ndvis <- test_site_data$ndvi_pad_fitted[minima_indices]
+    
+
+    high_max_i <- which(maxima_ndvis > 0.5)
+    high_max_count <- length(high_max_i)
+    high_max_min_date <- min(maxima_dates[high_max_i])
+    high_max_max_date <- max(maxima_dates[high_max_i])
+    highest_max <- max(maxima_ndvis)
+    highest_max_date_i <- which(maxima_ndvis == highest_max)
+    highest_max_date <- maxima_dates[highest_max_date_i]
+
+    low_min_i <- which(minima_ndvis <= max(maxima_ndvis) - 0.15)
+    low_min_date_i <- which((minima_dates <= high_max_max_date) &
+                              (minima_dates >= high_max_min_date))
+    before_max_i <- which(minima_dates <= highest_max_date)
+    low_min_btwn_i <- intersect(low_min_i, 
+                                intersect(low_min_date_i,
+                                          before_max_i))
+    low_min_count <- length(low_min_btwn_i)
+    
+    low_min_btwn_dates <- minima_dates[low_min_btwn_i]
+    
+    p <- ggplot(test_site_data) +
+      geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+      geom_point(aes(x = date, y = ndvi), col = 'red') +
+      
+      geom_line(aes(x = date, y = ndvi_pad_fitted)) +
+    #  geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+      theme_bw() +
+      ylim(0,1) + 
+      geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+      geom_vline(xintercept = low_min_btwn_dates, linetype = 'solid', color = 'lightgreen', lwd = 2) +
+
+     # geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") +
+    #  geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") +
+     # geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") +
+    #  geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") +
+      #   geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+      #    geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+      
+      ggtitle(paste0(lambda, ' ', location))
+    
+    plot(p)
+    # 
+    # high_max_i <- which(maxima_ndvis > 0.5)
+    # high_max_count <- length(high_max_i)
+    # high_max_min_date <- min(maxima_dates[high_max_i])
+    # high_max_max_date <- max(maxima_dates[high_max_i])
+    # 
+    # low_min_i <- which(minima_ndvis <= 0.55)
+    # low_min_date_i <- which((minima_dates <= high_max_max_date) &
+    #                           (minima_dates >= high_max_min_date))
+    # low_min_btwn_i <- intersect(low_min_i, low_min_date_i)
+    # low_min_count <- length(low_min_btwn_i)
+    # 
+    # all_sites$high_max_count[k] <- high_max_count
+    # all_sites$low_min_count[k] <- low_min_count
+    # 
+    # alert <- ""
+    
+  }
+  
+
+  #test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda, w_colName = 'w', weights = T)
+
+
+  ## Beck fit
+  # finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
+  # models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
+  # dates_indices_mark <- PhenoKl(models_mark$model$Beck)
+  # dates_mark <- test_site_data$date[dates_indices_mark]
+  # dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  # ndvi_beck <- finefit_mark$zs$iter2
+  # test_site_data$ndvi_beck <- ndvi_beck
+  
+ 
+  
+  # if(low_min_count >= 1){ 
+  #   ### if there is a low min btwn high maxes, 
+  #   ### then remove ndvi values prior to low min
+  #   alert <- "** "
+  #   last_low_min_i <- low_min_btwn_i[length(low_min_btwn_i)]
+  #   last_low_min_date <- minima_dates[last_low_min_i]
+  #   test_site_data[test_site_data$date <= last_low_min_date, 'ndvi'] <- NA
+  #   test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
+  #   
+  #   min_ndvi_date <- min(test_site_data_ndvi_valid$date)
+  #   
+  #   ##fill before dates
+  #   test_site_data$ndvi_pad <- test_site_data$ndvi
+  #   dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  #   test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  #   
+  #   ## Whittaker smooth
+  #   lambda <- 100
+  #   test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
+  #   
+  #   ## Beck fit
+  #   finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
+  #   models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
+  #   dates_indices_mark <- PhenoKl(models_mark$model$Beck)
+  #   dates_mark <- test_site_data$date[dates_indices_mark]
+  #   dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  #   ndvi_beck <- finefit_mark$zs$iter2
+  #   test_site_data$ndvi_beck <- ndvi_beck
+  #   
+  # }
+}
+dev.off()
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+- calculate for different VI's
+
+
+
+
+
+
+
+### calculate for different VI's
+
+
+
+
+
+
+
+
+## Add MODIS, VIIRS LSP dates
+```{r}
+site_vct <- all_sites$Location
+base_folder <- 'C:/Users/micha/Downloads/modis_lsp-20230723T194255Z-001/modis_lsp/'
+
+modis_lsp_dates <- lapply(site_vct, function(x){
+  sub_folder <- paste0(base_folder, x, '/')
+  csvs <- list.files(sub_folder, pattern = '.csv', full.names = T)
+  
+  greenup_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Greenup_1', 'Value'], 
+           a[a$Band == 'Greenup_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- as.Date('1970-01-01') + d
+  }) %>% do.call('c', .) 
+  
+  maturity_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Maturity_1', 'Value'], 
+           a[a$Band == 'Maturity_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- as.Date('1970-01-01') + d
+  }) %>% do.call('c', .) 
+  
+  sensescence_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Senescence_1', 'Value'], 
+           a[a$Band == 'Senescence_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- as.Date('1970-01-01') + d
+  }) %>% do.call('c', .) 
+  
+  dormancy_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Dormancy_1', 'Value'], 
+           a[a$Band == 'Dormancy_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- as.Date('1970-01-01') + d
+  }) %>% do.call('c', .) 
+  
+  peak_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Peak_1', 'Value'], 
+           a[a$Band == 'Peak_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- as.Date('1970-01-01') + d
+  }) %>% do.call('c', .) 
+  
+  
+  l <- list('g' = greenup_dates,
+            'm' = maturity_dates,
+            's' = sensescence_dates,
+            'd' = dormancy_dates,
+            'p' = peak_dates
+  )
+  return(l)
+  
+})
+
+names(modis_lsp_dates) <- site_vct
+
+
+
+
+
+base_folder <- 'C:/Users/micha/Downloads/viirs_lsp-20230723T194307Z-001/viirs_lsp/'
+
+viirs_lsp_dates <- lapply(site_vct, function(x){
+  print(x)
+  sub_folder <- paste0(base_folder, x, '/')
+  csvs <- list.files(sub_folder, pattern = '.csv', full.names = T)
+  
+  greenup_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Onset_Greenness_Increase_1', 'Value'], 
+           a[a$Band == 'Onset_Greenness_Increase_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- d[d!=32767]
+    d <- sapply(d, function(y){
+      d_year <- 2000 + y %/% 366
+      d_doy <- y %% 366
+      date <- as.Date(paste0(d_year, d_doy), format = '%Y%j') %>% as.character()
+    })
+    
+  }) %>% do.call('c', .) %>% unlist() %>% as.Date()
+  
+  maturity_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Onset_Greenness_Maximum_1', 'Value'], 
+           a[a$Band == 'Onset_Greenness_Maximum_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- d[d!=32767]
+    d <- sapply(d, function(y){
+      d_year <- 2000 + y %/% 366
+      d_doy <- y %% 366
+      date <- as.Date(paste0(d_year, d_doy), format = '%Y%j') %>% as.character()
+    })
+    
+  }) %>% do.call('c', .) %>% unlist() %>% as.Date()
+  
+  sensescence_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Onset_Greenness_Decrease_1', 'Value'], 
+           a[a$Band == 'Onset_Greenness_Decrease_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- d[d!=32767]
+    d <- sapply(d, function(y){
+      d_year <- 2000 + y %/% 366
+      d_doy <- y %% 366
+      date <- as.Date(paste0(d_year, d_doy), format = '%Y%j') %>% as.character()
+    })
+    
+  }) %>% do.call('c', .) %>% unlist() %>% as.Date()
+  
+  dormancy_dates <- lapply(csvs, function(file){
+    a <- read.csv(file)
+    d <- c(a[a$Band == 'Onset_Greenness_Minimum_1', 'Value'], 
+           a[a$Band == 'Onset_Greenness_Minimum_2', 'Value'])
+    d <- d[!is.na(d)]
+    d <- d[d!=32767]
+    d <- sapply(d, function(y){
+      d_year <- 2000 + y %/% 366
+      d_doy <- y %% 366
+      date <- as.Date(paste0(d_year, d_doy), format = '%Y%j') %>% as.character()
+    })
+    
+  }) %>% do.call('c', .) %>% unlist() %>% as.Date()
+  
+
+  
+  
+  l <- list('g' = greenup_dates,
+            'm' = maturity_dates,
+            's' = sensescence_dates,
+            'd' = dormancy_dates)
+  return(l)
+  
+})
+
+```
+
