@@ -27,7 +27,34 @@ library(phenofit)
 library(zoo)
 library(here)
 library(terra)
+library(scorepeak)
+
 ```
+
+```{r}
+fit_var <- function(df, colName, lambda, w_colName = NA, weights = F){
+  fitted_vi_col_name <- paste0(colName, "_fitted")
+  y_all <- df[[colName]] 
+  #  print(y_all)
+  y_all[is.infinite(y_all)] <- -9999
+  y_all[is.na(y_all)] <- -9999
+  if(weights == T ){
+    w <- df[[w_colName]]
+  } else {
+    w <- (y_all != -9999)
+  }
+  y_whit <- whit2(y_all, lambda, w)
+  #  print(y_whit)
+  df[[fitted_vi_col_name]] <- y_whit
+  return(df)
+}
+
+get_bit <- function(number, n) {
+  bit <- (number %% 2^(n + 1)) %/% (2^(n))
+  return(bit)
+}
+```
+
 
 ## Load data
 
@@ -38,6 +65,8 @@ data$date <- as_date(data$date)
 
 all_sites <- read.csv(here("data/all_pod_locations_o.csv"))
 ```
+
+
 
 ## Add DEA S2 data (SSA sites)
 
@@ -322,23 +351,7 @@ all_sites <- all_sites[!(all_sites$Location %in% planet_bad_sites), ]
 
 ## Kenya split
 
-```{r}
-fit_var <- function(df, colName, lambda, w_colName = NA, weights = F){
-  fitted_vi_col_name <- paste0(colName, "_fitted")
-  y_all <- df[[colName]] 
-  #  print(y_all)
-  y_all[is.na(y_all)] <- -9999
-  if(weights == T ){
-    w <- df[[w_colName]]
-  } else {
-    w <- (y_all != -9999)
-  }
-  y_whit <- whit2(y_all, lambda, w)
-  #  print(y_whit)
-  df[[fitted_vi_col_name]] <- y_whit
-  return(df)
-}
-```
+
 
 ```{r}
 all_sites$start_date <- as_date(all_sites$start_date, format = '%m/%d/%Y')
@@ -349,7 +362,6 @@ all_sites$end_date <- as_date(all_sites$end_date, format = '%m/%d/%Y')
 
 
 ```{r}
-library(scorepeak)
 
 kenya_sites <- all_sites %>% filter(grepl('kenya', Location))
 dorm <- 0.20
@@ -386,7 +398,7 @@ for (k in 1:NROW(kenya_sites )){
   # ## Beck fit
   finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
   models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
-  dates_indices_mark <- PhenoKl(models_mark$model$Beck)
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
   dates_mark <- test_site_data$date[dates_indices_mark]
   dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
   # ndvi_beck <- finefit_mark$zs$iter2
@@ -474,9 +486,25 @@ dev.off()
 
 ```
 
+Save data after Kenya split
+```{r}
+save(data, file = here('data/data_kenya_split.rda'))
+save(all_sites, file = here('data/all_sites_kenya_split.rda'))
+```
+
+
+
+
 
 ## Determine season validity (pods)
 - this is needed to determine dormancy values
+```{r}
+load(file = here('data/data_kenya_split.rda'))
+load(file = here('data/all_sites_kenya_split.rda'))
+```
+
+
+
 
 ```{r}
 pdf('season_check.pdf')
@@ -574,13 +602,29 @@ all_sites[all_sites$Location %in% nplatte_sites, 'Group'] <- 'planet_nplatte'
 data[data$Location %in% stockton_sites, 'group_id'] <- 'planet_stockton'
 data[data$Location %in% lincoln_sites, 'group_id'] <- 'planet_lincoln'
 data[data$Location %in% nplatte_sites, 'group_id'] <- 'planet_nplatte'
-
-
-
-
 ```
 
+```{r}
+all_sites <- all_sites %>% filter(Group != 'planet')
+```
+
+
+
+
 ## dormancy (calculate for different VI's)
+
+
+```{r}
+all_sites$group_cont <- sapply(all_sites$Group, function(x){
+  if (grepl('planet', x)){
+    return('US')
+  }
+  if (grepl('whittier', x)){
+    return('US')
+  }
+  return('SSA')
+})
+```
 
 
 
@@ -633,11 +677,10 @@ dev.off()
 
 ```
 
-
+- calculate dormancy by site group
 ```{r}
 groups <- unique(all_sites_full$group)
 group_df <- data.frame("group" = groups)
-group
 
 group_df$median_ndvi_10 <- sapply(1:NROW(group_df), function(k){
   current_group <- group_df$group[k]
@@ -684,9 +727,71 @@ group_df
 ```
 
 
+- calculate dormancy by continent
+```{r}
+
+
+
+groups <- unique(all_sites_full$group_cont)
+group_df <- data.frame("group" = groups)
+
+group_df$median_ndvi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group_cont == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$ndvi_10)
+  return(a)
+})
+
+group_df$median_evi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group_cont == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$evi_10)
+  return(a)
+})
+
+group_df$median_savi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group_cont == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$savi_10)
+  return(a)
+})
+
+group_df$median_gcvi_10 <- sapply(1:NROW(group_df), function(k){
+  current_group <- group_df$group[k]
+  group_sites <- all_sites_full %>% filter(group_cont == current_group) %>% filter(valid_season == 'Y')
+  if(nrow(group_sites) == 0){
+    return(NA)
+  }
+  a <- median(group_sites$gcvi_10)
+  return(a)
+})
+
+group_df
+
+write.csv(group_df, here('data/group_cont.csv'))
+
+```
 
 ## pod pheno extraction
--determine dates of min VI for clipping season
+- Examining local mins for weeding dates
+- sites with certain local mins will have observations before the local min removed
+- conditions are
+  - local min is before global max
+  - local min is at least 0.20 less than global max
+  - local min has a local max before it.
+    - this max is at least 0.10 higher than the min
+    - this max is at least 0.35
+  - the local min is less than 0.6
+
 ```{r}
 
 pdf('padding_labmdas.pdf')
@@ -696,10 +801,7 @@ for (k in 1:NROW(all_sites)){
   test_site_data$ndvi_pad <- test_site_data$ndvi
   print(location)
   test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
-  lat <- median(test_site_data_ndvi_valid$lat, na.rm = T)
-  long <- median(test_site_data_ndvi_valid$long, na.rm = T)
-  all_sites$lat[k] <- lat
-  all_sites$long[k] <- long
+ 
   
   min_ndvi_date <- min(test_site_data_ndvi_valid$date)
   max_ndvi_date <- max(test_site_data_ndvi_valid$date)
@@ -746,9 +848,32 @@ for (k in 1:NROW(all_sites)){
     highest_max_date_i <- which(maxima_ndvis == highest_max)
     highest_max_date <- maxima_dates[highest_max_date_i]
 
-    low_min_i <- which(minima_ndvis <= max(maxima_ndvis) - 0.15)
+    low_min_i <- which(minima_ndvis <= max(maxima_ndvis) - 0.20)
     low_min_date_i <- which((minima_dates <= high_max_max_date) &
                               (minima_dates >= high_max_min_date))
+    
+    low_min_date_log <- sapply(1:length(minima_dates), function(x){
+      min_date <- minima_dates[x]
+      min_val <- minima_ndvis[x]
+      max_before_min_date <- max(maxima_ndvis[maxima_dates <= min_date])
+      if(min_val > 0.6){
+        return(FALSE)
+      }
+      if(max_before_min_date < 0.35){
+        return(FALSE)
+      }
+      if((max_before_min_date - min_val) > 0.10){
+        return(TRUE)
+      } else {
+        return(FALSE)
+      }
+    })
+    low_min_date_i <- which(low_min_date_log == TRUE)
+      
+      
+    
+    
+    
     before_max_i <- which(minima_dates <= highest_max_date)
     low_min_btwn_i <- intersect(low_min_i, 
                                 intersect(low_min_date_i,
@@ -768,80 +893,18 @@ for (k in 1:NROW(all_sites)){
       geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
       geom_vline(xintercept = low_min_btwn_dates, linetype = 'solid', color = 'lightgreen', lwd = 2) +
 
-     # geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") +
-    #  geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") +
-     # geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") +
-    #  geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") +
-      #   geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
-      #    geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+
       
       ggtitle(paste0(lambda, ' ', location))
     
+    
+  #  if(low_min_count >0){
     plot(p)
-    # 
-    # high_max_i <- which(maxima_ndvis > 0.5)
-    # high_max_count <- length(high_max_i)
-    # high_max_min_date <- min(maxima_dates[high_max_i])
-    # high_max_max_date <- max(maxima_dates[high_max_i])
-    # 
-    # low_min_i <- which(minima_ndvis <= 0.55)
-    # low_min_date_i <- which((minima_dates <= high_max_max_date) &
-    #                           (minima_dates >= high_max_min_date))
-    # low_min_btwn_i <- intersect(low_min_i, low_min_date_i)
-    # low_min_count <- length(low_min_btwn_i)
-    # 
-    # all_sites$high_max_count[k] <- high_max_count
-    # all_sites$low_min_count[k] <- low_min_count
-    # 
-    # alert <- ""
+ 
     
   }
   
 
-  #test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda, w_colName = 'w', weights = T)
-
-
-  ## Beck fit
-  # finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
-  # models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
-  # dates_indices_mark <- PhenoKl(models_mark$model$Beck)
-  # dates_mark <- test_site_data$date[dates_indices_mark]
-  # dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
-  # ndvi_beck <- finefit_mark$zs$iter2
-  # test_site_data$ndvi_beck <- ndvi_beck
-  
- 
-  
-  # if(low_min_count >= 1){ 
-  #   ### if there is a low min btwn high maxes, 
-  #   ### then remove ndvi values prior to low min
-  #   alert <- "** "
-  #   last_low_min_i <- low_min_btwn_i[length(low_min_btwn_i)]
-  #   last_low_min_date <- minima_dates[last_low_min_i]
-  #   test_site_data[test_site_data$date <= last_low_min_date, 'ndvi'] <- NA
-  #   test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
-  #   
-  #   min_ndvi_date <- min(test_site_data_ndvi_valid$date)
-  #   
-  #   ##fill before dates
-  #   test_site_data$ndvi_pad <- test_site_data$ndvi
-  #   dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
-  #   test_site_data[test_site_data$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
-  #   
-  #   ## Whittaker smooth
-  #   lambda <- 100
-  #   test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
-  #   
-  #   ## Beck fit
-  #   finefit_mark <- FitDL.Beck(test_site_data$ndvi_pad_fitted)
-  #   models_mark <- curvefit(test_site_data$ndvi_pad_fitted, methods = 'Beck')
-  #   dates_indices_mark <- PhenoKl(models_mark$model$Beck)
-  #   dates_mark <- test_site_data$date[dates_indices_mark]
-  #   dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
-  #   ndvi_beck <- finefit_mark$zs$iter2
-  #   test_site_data$ndvi_beck <- ndvi_beck
-  #   
-  # }
 }
 dev.off()
 
@@ -856,20 +919,1707 @@ dev.off()
 ```
 
 
+- similar to above, but now adding Beck fit for 5 different options for comparison
+  - use raw ndvi data
+  - use raw ndvi data, with lag of 14 days, and dormancy value for 30
+  - use raw ndvi data, with lag of 28 days, and dormancy value for 30
+- if a local min exists, also include
+  - truncate first, use truncated data, with lag of 14 days, and dormancy value for 30
+  - truncate first, use truncated data, with lag of 28 days, and dormancy value for 30
+
+```{r}
+calculate_Beck_and_plot <- function(df){
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+    geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_pad_fitted), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    theme_bw() +
+    ylim(0,1) + 
+    geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(alert, location, ' ', dates_collapse_mark))
+#  plot(p)
+#  print(p)
+ # return(finefit_mark)
+  return(p)
+  
+}
+```
 
 
-- calculate for different VI's
+### Plots examining Beck curve fit
+```{r}
+lambda <- 1000
+
+pdf('padding_Beck.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+
+  test_site_data <- data %>% filter(Location == location) 
+  
+  
+  
+    ## plot 1
+
+  test_site_data$ndvi_pad <- test_site_data$ndvi_pad_fitted <- NULL
+  
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+  test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
+  min_ndvi_date <- min(test_site_data_ndvi_valid$date)
+  max_ndvi_date <- max(test_site_data_ndvi_valid$date)
+  
+  
+  test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
+  a <- calculate_Beck_and_plot(test_site_data)
+  plot(a)
+  
+  ## plot2
+  test_site_data$ndvi_pad <- test_site_data$ndvi_pad_fitted <- NULL
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+
+  lag <- 14
+  pad <- 30
+  dorm <- 0.20
+  
+  min_valid_date <- min_ndvi_date - lag - pad
+  max_valid_date <- max_ndvi_date + lag + pad
+  test_site_data_pad <- test_site_data %>% filter(date >= min_valid_date) %>% filter(date <= max_valid_date)
+  
+  ##fill  dates
+  dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  test_site_data_pad <- fit_var(test_site_data_pad, "ndvi_pad", lambda)
+  a <- calculate_Beck_and_plot(test_site_data_pad)
+  plot(a)
+  
+    ## plot3
+  test_site_data$ndvi_pad <- test_site_data$ndvi_pad_fitted <- NULL
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+
+  lag <- 28
+  pad <- 30
+  dorm <- 0.20
+  
+  min_valid_date <- min_ndvi_date - lag - pad
+  max_valid_date <- max_ndvi_date + lag + pad
+  test_site_data_pad <- test_site_data %>% filter(date >= min_valid_date) %>% filter(date <= max_valid_date)
+  
+  ##fill  dates
+  dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  test_site_data_pad <- fit_var(test_site_data_pad, "ndvi_pad", lambda)
+  a <- calculate_Beck_and_plot(test_site_data_pad)
+  plot(a)
+  
+  ## plot 4
+  test_site_data$ndvi_pad <- test_site_data$ndvi_pad_fitted <- NULL
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+    
+  lag <- 14
+  pad <- 30
+  dorm <- 0.20
+  
+  test_site_data <- fit_var(test_site_data, "ndvi_pad", lambda)
+  window_size <- 31
+  maxima_indices <- which(detect_localmaxima(test_site_data$ndvi_pad_fitted, w = window_size))
+  maxima_dates <- test_site_data$date[maxima_indices]
+  maxima_ndvis <- test_site_data$ndvi_pad_fitted[maxima_indices]
+  
+  minima_indices <- which(detect_localmaxima(-test_site_data$ndvi_pad_fitted, w = window_size))
+  minima_dates <- test_site_data$date[minima_indices]
+  minima_ndvis <- test_site_data$ndvi_pad_fitted[minima_indices]
+  
+  
+  high_max_i <- which(maxima_ndvis > 0.5)
+  high_max_count <- length(high_max_i)
+  high_max_min_date <- min(maxima_dates[high_max_i])
+  high_max_max_date <- max(maxima_dates[high_max_i])
+  highest_max <- max(maxima_ndvis)
+  highest_max_date_i <- which(maxima_ndvis == highest_max)
+  highest_max_date <- maxima_dates[highest_max_date_i]
+  
+  low_min_i <- which(minima_ndvis <= max(maxima_ndvis) - 0.20)
+  low_min_date_i <- which((minima_dates <= high_max_max_date) &
+                            (minima_dates >= high_max_min_date))
+  
+  low_min_date_log <- sapply(1:length(minima_dates), function(x){
+    min_date <- minima_dates[x]
+    min_val <- minima_ndvis[x]
+    max_before_min_date <- max(maxima_ndvis[maxima_dates <= min_date])
+    if(min_val > 0.6){
+      return(FALSE)
+    }
+    if(max_before_min_date < 0.35){
+      return(FALSE)
+    }
+    if((max_before_min_date - min_val) > 0.10){
+      return(TRUE)
+    } else {
+      return(FALSE)
+    }
+  })
+  low_min_date_i <- which(low_min_date_log == TRUE)
+
+  before_max_i <- which(minima_dates <= highest_max_date)
+  low_min_btwn_i <- intersect(low_min_i, 
+                              intersect(low_min_date_i,
+                                        before_max_i))
+  low_min_count <- length(low_min_btwn_i)
+  
+  low_min_btwn_dates <- minima_dates[low_min_btwn_i]
+  
+  if(low_min_count > 0){
+    last_low_min_i <- low_min_btwn_i[length(low_min_btwn_i)]
+    last_low_min_date <- minima_dates[last_low_min_i]
+    test_site_data_pad[test_site_data_pad$date <= last_low_min_date, 'ndvi'] <- NA
+    test_site_data_pad_ndvi_valid <- test_site_data_pad %>% filter(!is.na(ndvi))
+    
+    min_ndvi_date <- min(test_site_data_pad_ndvi_valid$date)
+    
+    ##fill before dates
+    test_site_data_pad$ndvi_pad <- test_site_data_pad$ndvi
+    dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+    
+    dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+    test_site_data_pad <- fit_var(test_site_data_pad, "ndvi_pad", lambda)
+    a <- calculate_Beck_and_plot(test_site_data_pad)
+    plot(a)
+  }
+  
+   ## plot 5
+  
+  lag <- 28
+  pad <- 30
+  dorm <- 0.20
+  if(low_min_count > 0){
+    last_low_min_i <- low_min_btwn_i[length(low_min_btwn_i)]
+    last_low_min_date <- minima_dates[last_low_min_i]
+    test_site_data_pad[test_site_data_pad$date <= last_low_min_date, 'ndvi'] <- NA
+    test_site_data_pad_ndvi_valid <- test_site_data_pad %>% filter(!is.na(ndvi))
+    
+    min_ndvi_date <- min(test_site_data_pad_ndvi_valid$date)
+    
+    ##fill before dates
+    test_site_data_pad$ndvi_pad <- test_site_data_pad$ndvi
+    dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+    
+    dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+    test_site_data_pad <- fit_var(test_site_data_pad, "ndvi_pad", lambda)
+    a <- calculate_Beck_and_plot(test_site_data_pad)
+    plot(a)
+  }
+  
+  
+
+}
+dev.off()
+
+```
+
+
+
+## choose best Mark method
+- for now we'll use:
+  - dormancy value by continent
+  - lag of 28, pad of 30
+  -  
+- extract dates for each VI
+- dormancy separate by continent? or site group...
+
+
+```{r}
+calculate_Beck_plot_return_dates <- function(df, 
+                                             vi_col,
+                                             vi_col_fitted){
+  
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  colors <- c(`good` = 'green',
+             `maybe` = 'yellow4',
+             `no` = 'red')
+  
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    geom_point(aes(x = date, y = ndvi_pad, col = quality_band), alpha = 0.5) +
+    scale_color_manual(values = colors) +
+
+    geom_line(aes(x = date, y = ndvi_pad_fitted), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    theme_bw() +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(location, ' ', dates_collapse_mark))
+#  plot(p)
+#  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+```
+
+
+
+```{r}
+group_df <- read.csv(here('data/group_cont.csv'))
+
+pdf('pod_pheno_extract.pdf')
+lambda <- 1000
+lag <- 28
+pad <- 30
+dorm <- NA
+vi_vct <- c('ndvi',
+            'gcvi',
+            'evi2',
+            'savi')
+
+dorm_ssa <- c('ndvi' = 0.2339862, 
+              'evi2'=     0.1109349,
+              'savi' = 0.1218989,
+              'gcvi' = 1.760248)
+dorm_us <- c('ndvi' = 0.3028290,
+             'evi2' = 0.2558185,
+             'savi' = 0.2644041,
+             'gcvi' = 1.448787)
+dorm_all = list('SSA' = dorm_ssa,
+                'US' = dorm_us)
+
+for(vi in vi_vct){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+
+}
+
+
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  
+
+
+  
+  
+  group_cont <- all_sites$group_cont[k]
+  
+  ## determine if we need to clip values before local min
+  ## this always uses ndvi
+  dorm <- dorm_all[[group_cont]]['ndvi']
+  test_site_data$ndvi_pad <- test_site_data$ndvi
+  test_site_data_ndvi_valid <- test_site_data %>% filter(!is.na(ndvi))
+  
+  min_ndvi_date <- min(test_site_data_ndvi_valid$date)
+  max_ndvi_date <- max(test_site_data_ndvi_valid$date)
+  
+  min_valid_date <- min_ndvi_date - lag - pad
+  max_valid_date <- max_ndvi_date + lag + pad
+  test_site_data_pad <- test_site_data %>% filter(date >= min_valid_date) %>% filter(date <= max_valid_date)
+  
+  # # weight
+  # test_site_data$w <- -9999
+  # test_site_data[!is.na(test_site_data$ndvi), 'w'] <- 1
+  # 
+  
+
+  
+  ##fill before dates
+  dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  ##fill after dates
+  dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+  test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, "ndvi_pad"] <-  dorm
+  
+  test_site_data_pad <- fit_var(test_site_data_pad, "ndvi_pad", lambda)
+  
+  window_size <- 31
+  maxima_indices <- which(detect_localmaxima(test_site_data_pad$ndvi_pad_fitted, w = window_size))
+  maxima_dates <- test_site_data_pad$date[maxima_indices]
+  maxima_ndvis <- test_site_data_pad$ndvi_pad_fitted[maxima_indices]
+  
+  minima_indices <- which(detect_localmaxima(-test_site_data_pad$ndvi_pad_fitted, w = window_size))
+  minima_dates <- test_site_data_pad$date[minima_indices]
+  minima_ndvis <- test_site_data_pad$ndvi_pad_fitted[minima_indices]
+  
+  
+  high_max_i <- which(maxima_ndvis > 0.5)
+  high_max_count <- length(high_max_i)
+  high_max_min_date <- min(maxima_dates[high_max_i])
+  high_max_max_date <- max(maxima_dates[high_max_i])
+  highest_max <- max(maxima_ndvis)
+  highest_max_date_i <- which(maxima_ndvis == highest_max)
+  highest_max_date <- maxima_dates[highest_max_date_i]
+  
+  low_min_i <- which(minima_ndvis <= max(maxima_ndvis) - 0.20)
+  low_min_date_i <- which((minima_dates <= high_max_max_date) &
+                            (minima_dates >= high_max_min_date))
+  
+  low_min_date_log <- sapply(1:length(minima_dates), function(x){
+    min_date <- minima_dates[x]
+    min_val <- minima_ndvis[x]
+    max_before_min_date <- max(maxima_ndvis[maxima_dates <= min_date])
+    if(min_val > 0.6){
+      return(FALSE)
+    }
+    if(max_before_min_date < 0.35){
+      return(FALSE)
+    }
+    if((max_before_min_date - min_val) > 0.10){
+      return(TRUE)
+    } else {
+      return(FALSE)
+    }
+  })
+  low_min_date_i <- which(low_min_date_log == TRUE)
+  
+  before_max_i <- which(minima_dates <= highest_max_date)
+  low_min_btwn_i <- intersect(low_min_i, 
+                              intersect(low_min_date_i,
+                                        before_max_i))
+  low_min_count <- length(low_min_btwn_i)
+  
+  low_min_btwn_dates <- minima_dates[low_min_btwn_i]
+  
+  ## fill in NA values for all vi's. 
+  if(low_min_count > 0){
+    print(paste0(location, ' truncated'))
+    last_low_min_i <- low_min_btwn_i[length(low_min_btwn_i)]
+    last_low_min_date <- minima_dates[last_low_min_i]
+    
+    for(vi in vi_vct){
+      test_site_data_pad[test_site_data_pad$date <= last_low_min_date, vi] <- NA
+    }
+    
+    
+    test_site_data_pad_ndvi_valid <- test_site_data_pad %>% filter(!is.na(ndvi))
+    
+    min_ndvi_date <- min(test_site_data_pad_ndvi_valid$date)
+    
+    
+   
+    #  a <- calculate_Beck_and_plot(test_site_data_pad)
+    #   plot(a)
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  for(vi in vi_vct){
+    print(vi)
+    vi_pad_col <- paste0(vi, '_pad')
+    vi_pad_fitted <- paste0(vi_pad_col, '_fitted')
+    
+    dorm <- dorm_all[[group_cont]][vi]
+    print(paste0('dorm ', dorm))
+
+    ## perform padding
+#    test_site_data$vi_pad <- test_site_data$vi_pad_fitted <- NULL
+    test_site_data_pad[[paste0(vi, '_pad')]] <- test_site_data_pad[[vi]]
+    
+    test_site_data_pad <- fit_var(test_site_data_pad, vi_pad_col, lambda)
+     # ##fill before dates
+    dates_to_fill <- seq.Date((min_ndvi_date - lag) - pad, to = min_ndvi_date - lag, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, vi_pad_col] <-  dorm
+
+    dates_to_fill <- seq.Date((max_ndvi_date + lag), to = max_ndvi_date + lag + pad, by = 1)
+    test_site_data_pad[test_site_data_pad$date %in% dates_to_fill, vi_pad_col] <-  dorm
+
+    test_site_data_pad <- fit_var(test_site_data_pad, vi_pad_col, lambda)
+    
+    
+  
+    
+    a <- calculate_Beck_plot_return_dates(test_site_data_pad,
+                                          vi_pad_col,
+                                          vi_pad_fitted)
+    plot(a[[1]])
+    all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+    all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+    all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+    all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+  }
+}
 
 
 
 
+dev.off()
+
+
+```
+
+
+```{r}
+save(data, file = here('data/data_post_mark_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_mark_fit.rda'))
+```
+
+
+## extract pheno for S1
+
+```{r}
+load(file = here('data/data_post_mark_fit.rda'))
+load(file = here('data/all_sites_post_mark_fit.rda'))
+```
+
+```{r}
+data$GEE_s1_A_vh_vv_gf <- data$GEE_s1_A_vh_gf/data$GEE_s1_A_vv_gf
+data$GEE_s1_A_vv_vh_gf <- data$GEE_s1_A_vv_gf/data$GEE_s1_A_vh_gf
+data$GEE_s1_A_rvi_gf <- (4 *data$GEE_s1_A_vh_gf)/(data$GEE_s1_A_vh_gf + data$GEE_s1_A_vv_gf)
+
+data$GEE_s1_D_vh_vv_gf <- data$GEE_s1_D_vh_gf/data$GEE_s1_D_vv_gf
+data$GEE_s1_D_vv_vh_gf <- data$GEE_s1_D_vv_gf/data$GEE_s1_D_vh_gf
+data$GEE_s1_D_rvi_gf <- (4 *data$GEE_s1_D_vh_gf)/(data$GEE_s1_D_vh_gf + data$GEE_s1_D_vv_gf)
+
+```
+
+- use lambda 10000
+- drop vv/vh
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c('GEE_s1_A_vh_gf',
+              'GEE_s1_A_vv_gf',
+              'GEE_s1_A_vh_vv_gf',
+            #  'GEE_s1_A_vv_vh_gf',
+              'GEE_s1_A_rvi_gf',
+              'GEE_s1_D_vh_gf',
+              'GEE_s1_D_vv_gf',
+              'GEE_s1_D_vh_vv_gf',
+        #      'GEE_s1_D_vv_vh_gf',
+              'GEE_s1_D_rvi_gf')){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+  all_sites[[paste0(vi, '_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_trunc_D')]] <- NA
+}
 
 
 
-### calculate for different VI's
+pdf('test_s1_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  vi_vct <- c('GEE_s1_A_vh_gf',
+              'GEE_s1_A_vv_gf',
+              'GEE_s1_A_vh_vv_gf',
+            #  'GEE_s1_A_vv_vh_gf',
+              'GEE_s1_A_rvi_gf')
+  num_A <- nrow(test_site_data %>% filter(!is.na(GEE_s1_A_vh_gf)))
+  num_D <- nrow(test_site_data %>% filter(!is.na(GEE_s1_D_vh_gf)))
+  print(num_A)
+  print(num_D)
+  if(num_A == 0){
+    if(num_D == 0){ ## skip site if no observations at all
+      next
+    }
+    ## if there are descending observations, switch variables to 'D'
+    vi_vct <- c('GEE_s1_D_vh_gf',
+              'GEE_s1_D_vv_gf',
+              'GEE_s1_D_vh_vv_gf',
+        #      'GEE_s1_D_vv_vh_gf',
+              'GEE_s1_D_rvi_gf')
+  }
+
+  for(vi in vi_vct){
+    print(vi)
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      
+      
+
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      
+      
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
 
 
 
+```{r}
+save(data, file = here('data/data_post_s1_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_s1_fit.rda'))
+```
+
+## S2 curve-fit
+
+
+```{r}
+load(file = here('data/data_post_s1_fit.rda'))
+load(file = here('data/all_sites_post_s1_fit.rda'))
+```
+
+```{r}
+data$DEA_s2_ndvi <- (data$DEA_s2_B08 - data$DEA_s2_B04)/(data$DEA_s2_B08 + data$DEA_s2_B04)
+data$DEA_s2_savi <- 1.5*(data$DEA_s2_B08 - data$DEA_s2_B04)/(data$DEA_s2_B08 +  data$DEA_s2_B04 + 0.5 )
+data$DEA_s2_evi2 <- 2.5 *(data$DEA_s2_B08 - data$DEA_s2_B04)/(data$DEA_s2_B08 + (2.4 *data$DEA_s2_B04) + 1.0 )
+data$DEA_s2_gcvi <- (data$DEA_s2_B08/ data$DEA_s2_B03) - 1.0
+
+data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+data <- data %>%
+  mutate(s2_good = recode(s2_good, 
+                          `0` = 'no',
+                          `1` = 'no',
+                          `2` = 'maybe', 
+                          `3` = 'no', 
+                          `4` = 'good', 
+                          `5` = 'good', 
+                          `6` = 'maybe',
+                          `7` = 'maybe',
+                          `8` = 'no',
+                          `9` = 'no',
+                          `10` = 'maybe',
+                          `11` = 'no'
+                          ))
+
+```
+
+- use lambda 10000
+- drop vv/vh
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c('DEA_s2_ndvi',
+            'DEA_s2_savi',
+            'DEA_s2_evi2',
+            'DEA_s2_gcvi',
+            's2_ndvi',
+            's2_savi',
+            's2_evi2',
+            's2_gcvi' )){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+  all_sites[[paste0(vi, '_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_s2_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  
+  test_site_data$quality_band <- test_site_data$s2_good
+
+    
+  vi_vct <- c('DEA_s2_ndvi',
+            'DEA_s2_savi',
+            'DEA_s2_evi2',
+            'DEA_s2_gcvi')
+  num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  print(num_DEA)
+  if(num_DEA == 0){
+    vi_vct <- c('s2_ndvi',
+            's2_savi',
+            's2_evi2',
+            's2_gcvi')
+  }
+
+  for(vi in vi_vct){
+    print(vi)
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+
+
+```{r}
+save(data, file = here('data/data_post_s2_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_s2_fit.rda'))
+```
+
+
+## MOD09GA curve-fit (no masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_s2_fit.rda'))
+load(file = here('data/all_sites_post_s2_fit.rda'))
+```
+
+```{r}
+data$mod_cloudy <- floor((data$MOD09GA_state_1km %% 2^11)/2^10) ## 0 if clear
+
+
+
+
+data <- data %>% mutate(MOD09GA_good = recode(mod_cloudy,
+                                              `0` = 'good',
+                                              `1` = 'no'))
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("MOD09GA_ndvi" ,
+            "MOD09GA_savi",
+            "MOD09GA_evi2",
+            "MOD09GA_gcvi")){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+  all_sites[[paste0(vi, '_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_mod09ga_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$MOD09GA_good
+  vi_vct <- c("MOD09GA_ndvi" ,
+            "MOD09GA_savi",
+            "MOD09GA_evi2",
+            "MOD09GA_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+
+
+```{r}
+save(data, file = here('data/data_post_mod09ga_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_mod09ga_fit.rda'))
+```
+
+
+
+## MOD09GA curve-fit (with masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_mod09ga_fit.rda'))
+load(file = here('data/all_sites_post_mod09ga_fit.rda'))
+```
+
+```{r}
+data$myd_cloudy <- floor((data$MYD09GA_state_1km %% 2^11)/2^10) ## 0 if clear
+data$mod_cloudy <- floor((data$MOD09GA_state_1km %% 2^11)/2^10) ## 0 if clear
+
+data <- data %>% mutate(MOD09GA_good = recode(mod_cloudy,
+                                              `0` = 'good',
+                                              `1` = 'no'))
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("MOD09GA_ndvi" ,
+            "MOD09GA_savi",
+            "MOD09GA_evi2",
+            "MOD09GA_gcvi")){
+  all_sites[[paste0(vi, '_flag_G')]] <- NA
+  all_sites[[paste0(vi, '_flag_M')]] <- NA
+  all_sites[[paste0(vi, '_flag_S')]] <- NA
+  all_sites[[paste0(vi, '_flag_D')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_mod09ga_flag_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$MOD09GA_good
+  vi_vct <- c("MOD09GA_ndvi" ,
+            "MOD09GA_savi",
+            "MOD09GA_evi2",
+            "MOD09GA_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    test_site_data[(!(test_site_data$MOD09GA_good == 'good')) &
+                   (!(is.na(test_site_data$MOD09GA_good))), vi] <- NA
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_flag_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_flag_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_flag_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_flag_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_flag_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+    } ## vi
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+```{r}
+save(data, file = here('data/data_post_mod09ga_flag_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_mod09ga_flag_fit.rda'))
+```
+
+## MYD09GA curve-fit (no masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_mod09ga_flag_fit.rda'))
+load(file = here('data/all_sites_post_mod09ga_flag_fit.rda'))
+```
+
+```{r}
+data$myd_cloudy <- floor((data$MYD09GA_state_1km %% 2^11)/2^10) ## 0 if clear
+
+data <- data %>% mutate(MYD09GA_good = recode(myd_cloudy,
+                                              `0` = 'good',
+                                              `1` = 'no'))
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("MYD09GA_ndvi" ,
+            "MYD09GA_savi",
+            "MYD09GA_evi2",
+            "MYD09GA_gcvi")){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+  all_sites[[paste0(vi, '_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_myd09ga_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$MYD09GA_good
+  vi_vct <- c("MYD09GA_ndvi" ,
+            "MYD09GA_savi",
+            "MYD09GA_evi2",
+            "MYD09GA_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+
+
+```{r}
+save(data, file = here('data/data_post_myd09ga_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_myd09ga_fit.rda'))
+```
+
+
+
+## MYD09GA curve-fit (with masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_myd09ga_fit.rda'))
+load(file = here('data/all_sites_post_myd09ga_fit.rda'))
+```
+
+```{r}
+data$myd_cloudy <- floor((data$MYD09GA_state_1km %% 2^11)/2^10) ## 0 if clear
+
+data <- data %>% mutate(MYD09GA_good = recode(myd_cloudy,
+                                              `0` = 'good',
+                                              `1` = 'no'))
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("MYD09GA_ndvi" ,
+            "MYD09GA_savi",
+            "MYD09GA_evi2",
+            "MYD09GA_gcvi")){
+  all_sites[[paste0(vi, '_flag_G')]] <- NA
+  all_sites[[paste0(vi, '_flag_M')]] <- NA
+  all_sites[[paste0(vi, '_flag_S')]] <- NA
+  all_sites[[paste0(vi, '_flag_D')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_flag_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_myd09ga_flag_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$MYD09GA_good
+  vi_vct <- c("MYD09GA_ndvi" ,
+            "MYD09GA_savi",
+            "MYD09GA_evi2",
+            "MYD09GA_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    test_site_data[(!(test_site_data$MYD09GA_good == 'good')) &
+                   (!(is.na(test_site_data$MYD09GA_good))), vi] <- NA
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_flag_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_flag_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_flag_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_flag_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_flag_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_flag_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+    } ## vi
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+```{r}
+save(data, file = here('data/data_post_myd09ga_flag_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_myd09ga_flag_fit.rda'))
+```
+
+
+
+## VIIRS sr (no masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_myd09ga_flag_fit.rda'))
+load(file = here('data/all_sites_post_myd09ga_flag_fit.rda'))
+```
+
+```{r}
+data$VIIRS_cloudy <- ((get_bit(data$VIIRS_sr_QF1, 2) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 3) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 6) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 7) == 0) ) %>% as.numeric()
+                      
+  
+
+data <- data %>% mutate(VIIRS_sr_good = recode(VIIRS_cloudy,
+                                              `1` = 'good',
+                                              `0` = 'no'))
+
+
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("VIIRS_sr_ndvi" ,
+            "VIIRS_sr_savi",
+            "VIIRS_sr_evi2",
+            "VIIRS_sr_gcvi")){
+  all_sites[[paste0(vi, '_G')]] <- NA
+  all_sites[[paste0(vi, '_M')]] <- NA
+  all_sites[[paste0(vi, '_S')]] <- NA
+  all_sites[[paste0(vi, '_D')]] <- NA
+  all_sites[[paste0(vi, '_trunc_G')]] <- NA
+  all_sites[[paste0(vi, '_trunc_M')]] <- NA
+  all_sites[[paste0(vi, '_trunc_S')]] <- NA
+  all_sites[[paste0(vi, '_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_VIIRS_sr_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$VIIRS_sr_good
+  vi_vct <- c("VIIRS_sr_ndvi" ,
+            "VIIRS_sr_savi",
+            "VIIRS_sr_evi2",
+            "VIIRS_sr_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, '_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, '_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, '_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+
+
+```{r}
+save(data, file = here('data/data_post_VIIRS_sr_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_VIIRS_sr_fit.rda'))
+```
+
+
+## VIIRS sr (with masking) (no clip and clip)
+
+```{r}
+load(file = here('data/data_post_VIIRS_sr_fit.rda'))
+load(file = here('data/all_sites_post_VIIRS_sr_fit.rda'))
+```
+
+```{r}
+data$VIIRS_cloudy <- ((get_bit(data$VIIRS_sr_QF1, 2) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 3) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 6) == 0) &
+                     (get_bit(data$VIIRS_sr_QF2, 7) == 0) ) %>% as.numeric()
+                      
+  
+
+data <- data %>% mutate(VIIRS_sr_good = recode(VIIRS_cloudy,
+                                              `1` = 'good',
+                                              `0` = 'no'))
+
+
+
+
+#data$s2_good <- ifelse(is.na(data$DEA_s2_SCL), data$s2_SCL, data$DEA_s2_SCL)
+
+# data <- data %>%
+#   mutate(s2_good = recode(s2_good, 
+#                           `0` = 'no',
+#                           `1` = 'no',
+#                           `2` = 'maybe', 
+#                           `3` = 'no', 
+#                           `4` = 'good', 
+#                           `5` = 'good', 
+#                           `6` = 'maybe',
+#                           `7` = 'maybe',
+#                           `8` = 'no',
+#                           `9` = 'no',
+#                           `10` = 'maybe',
+#                           `11` = 'no'
+#                           ))
+
+```
+
+- use lambda 10000
+- try clipping based on mins before and after global max
+
+```{r}
+for(vi in c("VIIRS_sr_ndvi" ,
+            "VIIRS_sr_savi",
+            "VIIRS_sr_evi2",
+            "VIIRS_sr_gcvi")){
+  all_sites[[paste0(vi, 'flag_G')]] <- NA
+  all_sites[[paste0(vi, 'flag_M')]] <- NA
+  all_sites[[paste0(vi, 'flag_S')]] <- NA
+  all_sites[[paste0(vi, 'flag_D')]] <- NA
+  all_sites[[paste0(vi, 'flag_trunc_G')]] <- NA
+  all_sites[[paste0(vi, 'flag_trunc_M')]] <- NA
+  all_sites[[paste0(vi, 'flag_trunc_S')]] <- NA
+  all_sites[[paste0(vi, 'flag_trunc_D')]] <- NA
+}
+
+
+
+pdf('test_VIIRS_sr_flag_plots.pdf')
+for (k in 1:nrow(all_sites)){
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  test_site_data$quality_band <- test_site_data$VIIRS_sr_good
+  vi_vct <- c("VIIRS_sr_ndvi" ,
+            "VIIRS_sr_savi",
+            "VIIRS_sr_evi2",
+            "VIIRS_sr_gcvi")
+  # num_DEA <- nrow(test_site_data %>% filter(!is.na(DEA_s2_ndvi)))
+  # print(num_DEA)
+  # if(num_DEA == 0){
+  #   vi_vct <- c('s2_ndvi',
+  #           's2_savi',
+  #           's2_evi2',
+  #           's2_gcvi')
+  # }
+
+  for(vi in vi_vct){
+    print(vi)
+    test_site_data[(!(test_site_data$VIIRS_sr_good == 'good')) &
+                   (!(is.na(test_site_data$VIIRS_sr_good))), vi] <- NA
+    for(lambda in c(10000)){
+      test_site_data <- fit_var(test_site_data,
+                                vi,
+                                lambda)
+      vi_fitted_col <- paste0(vi, '_fitted')
+      a <- calculate_Beck_plot_return_dates(test_site_data,
+                                          vi,
+                                          vi_fitted_col)
+      
+      global_max <- max(test_site_data[[vi_fitted_col]])
+      global_max_i <- which(test_site_data[[vi_fitted_col]] == global_max)
+      global_max_date <- test_site_data$date[global_max_i]
+      
+      before_min_df <- test_site_data %>% filter(date <= global_max_date)
+      before_min <- min(before_min_df[[vi_fitted_col]])
+      before_min_i <- which(before_min_df[[vi_fitted_col]] == before_min)
+      before_min_date <- before_min_df$date[before_min_i]
+      
+      after_min_df <- test_site_data %>% filter(date >= global_max_date)
+      after_min <- min(after_min_df[[vi_fitted_col]])
+      after_min_i <- which(after_min_df[[vi_fitted_col]] == after_min)
+      after_min_date <- after_min_df$date[after_min_i]
+      
+      b <- a[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b)
+      
+      test_site_data_trunc <- test_site_data %>% 
+        filter(date >= before_min_date) %>% 
+        filter(date <= after_min_date)
+      
+      a_trunc <- calculate_Beck_plot_return_dates(test_site_data_trunc,
+                                          vi,
+                                          vi_fitted_col) 
+      b_trunc <- a_trunc[[1]] + 
+             geom_vline(xintercept =  before_min_date, lwd= 2, col = 'purple') +
+             geom_vline(xintercept =  after_min_date, lwd = 2, col = 'purple')
+      plot(b_trunc)
+      
+      all_sites[[paste0(vi, 'flag_G')]][k] <- a[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, 'flag_M')]][k] <- a[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, 'flag_S')]][k] <- a[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, 'flag_D')]][k] <- a[[2]][4] %>% as.character()
+      
+      all_sites[[paste0(vi, 'flag_trunc_G')]][k] <- a_trunc[[2]][1] %>% as.character()
+      all_sites[[paste0(vi, 'flag_trunc_M')]][k] <- a_trunc[[2]][2] %>% as.character()
+      all_sites[[paste0(vi, 'flag_trunc_S')]][k] <- a_trunc[[2]][3] %>% as.character()
+      all_sites[[paste0(vi, 'flag_trunc_D')]][k] <- a_trunc[[2]][4] %>% as.character()
+      
+      
+
+    } ## vi
+    
+    
+    
+    
+  } ## lambda
+  
+}
+
+dev.off()
+```
+
+
+
+```{r}
+save(data, file = here('data/data_post_VIIRS_sr_flag_fit.rda'))
+save(all_sites, file = here('data/all_sites_post_VIIRS_sr_flag_fit.rda'))
+```
 
 
 
