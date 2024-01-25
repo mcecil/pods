@@ -9,5 +9,8 @@
 ## R
 
 1. Use 'pre_analysis_remove_secondary_S1.R' to filter the ascending orbit images to the most common view angle.
-2. 
+2. 'Analysis_PRE_PROCESSING.Rmd' performs several pre-processing steps, including joining Sentinel-1 and 2 data, splitting Kenya data into separate seasons, and calculating VI dormancy values.
+3. 'Analysis_PHENO_FITTING.Rmd' performs padding for Mark time-series, masking for Sentinel-2 and VIIRS surface reflectance, and curve-fitting and Land Surface Phenology (LSP) extraction for Mark, Sentinel 1 and 2, VIIRS surface reflectance, and VIIRS Land Cover Dynamics (LCD). It also joins management data (planting and harvest) to site table.
+4. 'Analysis_MULTISENSOR.Rmd' calculates mean and median LSP values, and uses a random forest model to calculate LSP dates, excluding each site's current group from training the model.
+5. 'Analysis_QUALITYCHECK.Rmd' outputs a pdf for visual interpretation to assess Mark LSP dates. After interpreting, Mark LSP dates that are not considered valid are excluded form downstream tasks.
 
