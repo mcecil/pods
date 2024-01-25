@@ -6,5 +6,8 @@
 4. Download Sentinel-1 data from GEE using "extract_gee_coll_s1_download.ipynb". Perform LASSO filter using "sentinel_lasso.ipynb".
 5. ***Join data for different sources using "process_gee_rf.ipynb". Data is saved to "all_filt.csv", "all_filt_valid_pod.csv", "all_joined.csv".
 
+## R
 
+1. Use 'pre_analysis_remove_secondary_S1.R' to filter the ascending orbit images to the most common view angle.
+2. 
 
