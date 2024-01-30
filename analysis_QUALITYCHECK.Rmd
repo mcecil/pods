@@ -1,0 +1,365 @@
+---
+title: "Pod work"
+author: "Mike Cecil"
+date: "2023-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Quality check
+
+This script performs the following processing steps
+- Images for each site of raw Mark observations, curve-fit, and LSP dates are exported to a .pdf file, 'pod_pheno_extract_qual_trs.pdf'.
+- A table for quality check is exported to 'all_sites_quality_check_trs_BEFORE.csv', with columns for checking each LSP date, e.g. "G_keep" for greenup.
+- Using the .pdf file, the user checks the Mark LSP dates for each site, and updates the table in the .csv file, using TRUE to keep the site's LSP date and FALSE to remove it from consideration. After finishing all sites, the user updates the column names from "G_keep" to "G_keep_post" etc, and renames the file 'all_sites_quality_check_trs_AFTER.csv'. 
+- The 'all_sites_quality_check_trs_AFTER.csv' file is read in 'analysis_MULTISENSOR.Rmd' and all LSP dates recorded as FALSE in "G_keep_post" etc. have their dates set to NA.  
+
+
+
+```{r}
+library(dplyr)
+#library(randomForest)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(Rcpp)
+library(phenofit)
+library(zoo)
+library(here)
+library(terra)
+library(scorepeak)
+library(ranger)
+library(pspline)
+
+```
+
+```{r}
+
+fit_var <- function(df, colName, lambda, w_colName = NA, weights = F, quality_band = F){
+ 
+  # mask out bad pixels if quality band option is True
+  if (quality_band == T){
+    df[ (!is.na(df$quality_band)) & df$quality_band != 'good', colName] <- NA
+  }
+  
+  fitted_vi_col_name <- paste0(colName, "_fitted")
+  y_all <- df[[colName]] 
+  #  print(y_all)
+  y_all[is.infinite(y_all)] <- -9999
+  y_all[is.na(y_all)] <- -9999
+  if(weights == T ){
+    w <- df[[w_colName]]
+  } else {
+    w <- (y_all != -9999)
+  }
+  y_whit <- whit2(y_all, lambda, w)
+  #  print(y_whit)
+  df[[fitted_vi_col_name]] <- y_whit
+  return(df)
+}
+
+
+plot_quality <- function(df, 
+                         vi_col,
+                         vi_col_fitted,
+                         g_qual,
+                         m_qual,
+                         s_qual,
+                         d_qual){
+  
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark_15 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.15))
+  dates_indices_mark_90 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.90))
+  dates_indices_mark <- c(dates_indices_mark_15[1], 
+                          dates_indices_mark_90[1],
+                          dates_indices_mark_90[2],
+                          dates_indices_mark_15[2])
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  colors <- c(`good` = 'green',
+             `maybe` = 'yellow4',
+             `no` = 'red')
+  
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+  #  geom_point(aes(x = date, y = ndvi_pad, col = quality_band), alpha = 0.5) +
+    scale_color_manual(values = colors) +
+
+    geom_line(aes(x = date, y = ndvi_pad_fitted), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    theme_bw() +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype= `g_qual`, lwd= 2, color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype= `m_qual`, lwd= 2,  color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype= `s_qual`, lwd= 2,  color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype= `d_qual`, lwd= 2,  color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(location, ' ', dates_collapse_mark))
+#  plot(p)
+#  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+
+
+
+
+ 
+```
+
+```{r}
+load(file = here('data/all_sites_post_mgmt.rda'))
+load(file = here('data/data_post_VIIRS_sr_fit.rda'))
+```
+
+
+
+
+## Quality of obs
+
+```{r}
+
+#sites <- all_sites$Location
+
+all_sites$evi2_G_trs_delta <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_G_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2))
+  a <- min(abs(current_df_filt$date - current_lsp) ) %>% as.numeric()
+})
+
+all_sites$evi2_M_trs_delta <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_M_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2))
+  a <- min(abs(current_df_filt$date - current_lsp) ) %>% as.numeric()
+})
+
+all_sites$evi2_S_trs_delta <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_S_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2))
+  a <- min(abs(current_df_filt$date - current_lsp) ) %>% as.numeric()
+})
+
+all_sites$evi2_D_trs_delta <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_D_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2))
+  a <- min(abs(current_df_filt$date - current_lsp) ) %>% as.numeric()
+})
+
+all_sites$evi2_G_trs_hq <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_G_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2)) %>% filter(abs((date - current_lsp) %>% as.numeric()) <= 5 ) 
+  a <- nrow(current_df_filt)
+})
+
+all_sites$evi2_M_trs_hq <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_M_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2)) %>% filter(abs((date - current_lsp) %>% as.numeric()) <= 5 ) 
+  a <- nrow(current_df_filt)
+})
+
+all_sites$evi2_S_trs_hq <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_S_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2)) %>% filter(abs((date - current_lsp) %>% as.numeric()) <= 5 ) 
+  a <- nrow(current_df_filt)
+})
+
+all_sites$evi2_D_trs_hq <- sapply(1:nrow(all_sites), function(x){
+  current_lsp <- all_sites$evi2_D_trs[x] %>% as_date()
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site)
+  current_df_filt <- current_df %>% filter(!is.na(evi2)) %>% filter(abs((date - current_lsp) %>% as.numeric()) <= 5 ) 
+  a <- nrow(current_df_filt)
+})
+
+
+all_sites$G_qual <- sapply(1:nrow(all_sites), function(k){
+  if(is.na(all_sites$evi2_G_trs_delta[k])){
+    return(NA)
+  }
+  if(all_sites$evi2_G_trs_hq[k] >= 5){
+    return('solid')
+  }
+  if(all_sites$evi2_G_trs_delta[k] <= 14){
+    return('longdash')
+  }
+  if(all_sites$evi2_G_trs_delta[k] <= 28){
+    return('twodash')
+  }
+  return('dotted')
+}) 
+
+all_sites$M_qual <- sapply(1:nrow(all_sites), function(k){
+  if(is.na(all_sites$evi2_M_trs_delta[k])){
+    return(NA)
+  }
+  if(all_sites$evi2_M_trs_hq[k] >= 5){
+    return('solid')
+  }
+  if(all_sites$evi2_M_trs_delta[k] <= 14){
+    return('longdash')
+  }
+  if(all_sites$evi2_M_trs_delta[k] <= 28){
+    return('twodash')
+  }
+  return('dotted')
+}) 
+
+all_sites$S_qual <- sapply(1:nrow(all_sites), function(k){
+  if(is.na(all_sites$evi2_S_trs_delta[k])){
+    return(NA)
+  }
+  if(all_sites$evi2_S_trs_hq[k] >= 5){
+    return('solid')
+  }
+  if(all_sites$evi2_S_trs_delta[k] <= 14){
+    return('longdash')
+  }
+  if(all_sites$evi2_S_trs_delta[k] <= 28){
+    return('twodash')
+  }
+  return('dotted')
+}) 
+
+all_sites$D_qual <- sapply(1:nrow(all_sites), function(k){
+  if(is.na(all_sites$evi2_D_trs_delta[k])){
+    return(NA)
+  }
+  if(all_sites$evi2_D_trs_hq[k] >= 5){
+    return('solid')
+  }
+  if(all_sites$evi2_D_trs_delta[k] <= 14){
+    return('longdash')
+  }
+  if(all_sites$evi2_D_trs_delta[k] <= 28){
+    return('twodash')
+  }
+  
+  return('dotted')
+}) 
+to_keep <- c('solid' = TRUE,
+             'longdash' = TRUE,
+             'twodash' = TRUE,
+             'dotted' = FALSE)
+all_sites$G_keep <- to_keep[all_sites$G_qual]
+all_sites$M_keep <- to_keep[all_sites$M_qual]
+all_sites$S_keep <- to_keep[all_sites$S_qual]
+all_sites$D_keep <- to_keep[all_sites$D_qual]
+
+all_sites$G_keep[is.na(all_sites$G_keep)] <- FALSE
+all_sites$M_keep[is.na(all_sites$M_keep)] <- FALSE
+all_sites$S_keep[is.na(all_sites$S_keep)] <- FALSE
+all_sites$D_keep[is.na(all_sites$D_keep)] <- FALSE
+
+
+write.csv(all_sites[,c('Location',
+                       "evi2_G_trs_delta",
+                       "evi2_M_trs_delta",
+                       "evi2_S_trs_delta",
+                       "evi2_D_trs_delta",
+                       "evi2_G_trs_hq",
+                       "evi2_M_trs_hq",
+                       "evi2_S_trs_hq",
+                       "evi2_D_trs_hq",
+                       "G_qual",
+                       "M_qual",
+                       "S_qual",
+                       "D_qual",
+                       "G_keep",
+                       "M_keep",
+                       "S_keep",
+                       "D_keep")], file = 'all_sites_quality_check_trs_BEFORE.csv')
+                       
+
+```
+ 
+
+
+
+```{r}
+group_df <- read.csv(here('data/group_cont.csv'))
+
+pdf('pod_pheno_extract_qual_trs.pdf')
+
+
+
+for (k in 1:nrow(all_sites)){
+  print(k)
+  location <- all_sites$Location[k]
+  print(location)
+  test_site_data <- data %>% filter(Location == location)
+  
+
+  vi_pad_col <- 'evi2_pad'
+  vi_pad_fitted <-  'evi2_pad_fitted'
+    
+  g_qual <- all_sites$G_qual[k]
+  m_qual <- all_sites$M_qual[k]
+  s_qual <- all_sites$S_qual[k]
+  d_qual <- all_sites$D_qual[k]
+    
+  a <- plot_quality(test_site_data,
+                     vi_pad_col,
+                     vi_pad_fitted,
+                     g_qual,
+                     m_qual,
+                     s_qual,
+                     d_qual)
+  plot(a[[1]])
+
+  
+}
+
+
+
+
+dev.off()
+
+
+```
+
+
+
+

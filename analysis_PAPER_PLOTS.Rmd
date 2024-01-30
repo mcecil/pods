@@ -1,0 +1,1387 @@
+---
+title: "Pod work"
+author: "Mike Cecil"
+date: "2023-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Paper plots
+
+This script performs the following processing steps
+- The script performs bias, MAD, and Rsquared analysis for all paper figures and tables. 
+- Figures and tables are saved to files with the figure/table number in the file name.
+
+```{r}
+library(dplyr)
+#library(randomForest)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(Rcpp)
+library(phenofit)
+library(zoo)
+library(here)
+library(terra)
+library(scorepeak)
+library(ranger)
+library(pspline)
+library(rlang)
+library(lmodel2)
+```
+
+
+
+```{r}
+
+add_cols <- function(df, base_vi, other_vis, metrics, prefix){
+  vi_metric_grid <- expand.grid('vi' = other_vis, 'metric' = metrics)
+  for(k in 1:nrow(vi_metric_grid)){
+    print(k)
+    vi <- vi_metric_grid$vi[k]
+    print(vi)
+    metric <- vi_metric_grid$metric[k]
+    print(metric)
+    df[[paste0(base_vi, '_', metric)]] <- as_date(df[[paste0(base_vi, '_', metric)]])
+    df[[paste0(vi, '_', metric)]] <- as_date(df[[paste0(vi, '_', metric)]])
+    df[[paste0(prefix, vi, '_', base_vi, '_', metric)]] <- (as_date(df[[paste0(vi, '_', metric)]]) - as_date(df[[paste0(base_vi, '_', metric)]])) %>% as.numeric()
+  }
+  return(df)
+}
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+
+fit_var <- function(df, colName, lambda, w_colName = NA, weights = F){
+  fitted_vi_col_name <- paste0(colName, "_fitted")
+  y_all <- df[[colName]] 
+  #  print(y_all)
+  y_all[is.infinite(y_all)] <- -9999
+  y_all[is.na(y_all)] <- -9999
+  if(weights == T ){
+    w <- df[[w_colName]]
+  } else {
+    w <- (y_all != -9999)
+  }
+  y_whit <- whit2(y_all, lambda, w)
+  #  print(y_whit)
+  df[[fitted_vi_col_name]] <- y_whit
+  return(df)
+}
+
+get_bit <- function(number, n) {
+  bit <- (number %% 2^(n + 1)) %/% (2^(n))
+  return(bit)
+}
+
+calculate_Beck_plot_quality <- function(df, 
+                                             vi_col,
+                                             vi_col_fitted,
+                                        g_qual,
+                                        m_qual,
+                                        s_qual,
+                                        d_qual){
+  
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  colors <- c(`good` = 'green',
+             `maybe` = 'yellow4',
+             `no` = 'red')
+  
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+  #  geom_point(aes(x = date, y = ndvi_pad, col = quality_band), alpha = 0.5) +
+    scale_color_manual(values = colors) +
+
+    geom_line(aes(x = date, y = ndvi_pad_fitted), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    theme_bw(base_size = global_size)  +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype= `g_qual`, lwd= 2, color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype= `m_qual`, lwd= 2,  color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype= `s_qual`, lwd= 2,  color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype= `d_qual`, lwd= 2,  color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(location, ' ', dates_collapse_mark))
+#  plot(p)
+#  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+
+
+calculate_Beck_plot_return_dates_rf <- function(df, 
+                                                vi_col,
+                                                vi_col_fitted,
+                                                pred_col,
+                                                pred_col_fitted,
+                                                mark_lsp_dates,
+                                                location){
+  
+  mark_lsp_dates <- as_date(mark_lsp_dates)
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+
+  df[['predict']] <- df[[pred_col]]
+  df[['predict_fitted']] <- df[[pred_col_fitted]]
+  
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- pred_col_fitted
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  
+  
+  # colors <- c(`good` = 'green',
+  #            `maybe` = 'yellow4',
+  #            `no` = 'red')
+  
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    geom_point(aes(x = date, y = ndvi_pad, col = 'red'), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_pad_fitted, col = 'red'), alpha = 0.5) +
+
+
+    geom_point(aes(x = date, y = predict), col = 'blue', alpha = 0.5) +
+    geom_line(aes(x = date, y = predict_fitted), col = 'blue', alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'grey') + 
+    theme_bw(base_size = global_size)  +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", lwd = 2, color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", lwd = 2, color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", lwd = 2, color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", lwd = 2, color = "orange3") +
+    geom_vline(xintercept= mark_lsp_dates[1], linetype="dashed", lwd = 2, color = "lightgreen") +
+    geom_vline(xintercept= mark_lsp_dates[2], linetype="dashed", lwd = 2, color = "darkgreen") +
+    geom_vline(xintercept= mark_lsp_dates[3], linetype="dashed", lwd = 2, color = "yellow2") +
+    geom_vline(xintercept= mark_lsp_dates[4], linetype="dashed", lwd = 2, color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(location, ' ', dates_collapse_mark))
+#  plot(p)
+#  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+
+rescaleVect <- function(columnVect){
+  min_vect <- min(columnVect, na.rm = T)
+  max_vect <- max(columnVect, na.rm = T)
+  transformedVect <- (columnVect - min_vect) * (0.8/(max_vect - min_vect)) + 0.1
+}
+
+regress_dates <- function(df,
+                          date_base_col,
+                          date_1_col,
+                          date_2_col){
+  df$date_1_col <- df[[date_1_col]]
+  df$date_2_col <- df[[date_2_col]]
+  df <- df %>% filter(!is.na(date_1_col)) %>% filter(!is.na(date_2_col))
+  df$date_1_days <- (as_date(df[[date_1_col]]) - as_date(df[[date_base_col]])) %>% as.numeric()
+  df$date_2_days <- (as_date(df[[date_2_col]]) - as_date(df[[date_base_col]])) %>% as.numeric()
+  max_days <- max(max(df$date_1_days), max(df$date_2_days))
+
+  mod_2 <- lmodel2( date_2_days ~ date_1_days, data = df, "interval", "interval", 95)  # 95% ci
+  intercept <- mod_2$regression.results[2, 'Intercept']
+  slope <- mod_2$regression.results[2, 'Slope']
+  rsq <- mod_2$rsquare
+  
+  n <- nrow(df)
+
+  p <- ggplot(df, aes(date_1_days, date_2_days)) +
+     geom_point(aes(col = Group)) +
+   #  stat_ma_line(method = "MA") +
+     geom_abline(intercept = 0, slope = 1,linetype = 'dashed',  col = 'black') +
+     geom_abline(intercept = intercept, slope = slope, col = 'red') +
+    # stat_ma_eq(use_label(c("eq", "R2", 'P'))) +
+     theme_bw(base_size = global_size)  + xlim(0,max_days) + ylim(0, max_days) + 
+     xlab(date_1_col) + ylab(date_2_col)
+ # plot(p)
+  rsq <- mod_2$rsquare %>% round(2)
+  p_val <- mod_2$P.param %>% round(2)
+  return(list(p, mod_2, n, rsq, p_val))
+}  
+  
+
+ 
+```
+
+
+
+```{r}
+load(file = here('all_sites_post_rf_mean_median.rda'))
+load(file = here('data_post_rf_mean_median.rda'))
+
+daily_obs <- data %>% distinct()
+
+## fixing s2 DEA column names for all_sites
+s2_cols_sites <- names(all_sites)[substr(names(all_sites), 1, 7) == 'DEA_s2_']
+for(s2_col in s2_cols_sites){
+  new_col_name <- str_replace(s2_col, 'DEA_s2_', 's2_')
+  all_sites[[new_col_name]] <- all_sites[[s2_col]]
+}
+
+# set all date variables to date type
+date_vars <- names(all_sites)[grepl("_trs", (names(all_sites)))]
+for(var in date_vars){
+  all_sites[[var]] <- as_date(all_sites[[var]])
+}
+
+# update variable names for VIIRS LCD
+names(all_sites)[names(all_sites) == "VIIRS_lsp_G"] <- "VIIRS_lsp_G_trs"
+names(all_sites)[names(all_sites) == "VIIRS_lsp_M"] <- "VIIRS_lsp_M_trs"
+names(all_sites)[names(all_sites) == "VIIRS_lsp_S"] <- "VIIRS_lsp_S_trs"
+names(all_sites)[names(all_sites) == "VIIRS_lsp_D"] <- "VIIRS_lsp_D_trs"
+
+
+
+## assure VIIRS LCD dates are within season (set to NA otherwise)
+all_sites <- all_sites %>%
+  mutate(VIIRS_lsp_G_trs = ifelse(VIIRS_lsp_G_trs < start_date | VIIRS_lsp_G_trs > end_date, NA, VIIRS_lsp_G_trs))
+all_sites <- all_sites %>%
+  mutate(VIIRS_lsp_M_trs = ifelse(VIIRS_lsp_M_trs < start_date | VIIRS_lsp_M_trs > end_date, NA, VIIRS_lsp_M_trs))
+all_sites <- all_sites %>%
+  mutate(VIIRS_lsp_S_trs = ifelse(VIIRS_lsp_S_trs < start_date | VIIRS_lsp_S_trs > end_date, NA, VIIRS_lsp_S_trs))
+all_sites <- all_sites %>%
+  mutate(VIIRS_lsp_D_trs = ifelse(VIIRS_lsp_D_trs < start_date | VIIRS_lsp_D_trs > end_date, NA, VIIRS_lsp_D_trs))
+
+# fix blank planting and harvest dates
+
+all_sites[!is.na(all_sites$PlantingDate) & all_sites$PlantingDate == "", "PlantingDate"] <- NA
+all_sites[!is.na(all_sites$HarvestDate) & all_sites$HarvestDate == "", "HarvestDate"] <- NA
+
+## quality filter
+
+all_sites[all_sites$G_keep_post == FALSE, 'evi2_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'evi2_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'evi2_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'evi2_D_trs'] <- NA
+
+all_sites[all_sites$G_keep_post == FALSE, 'ndvi_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'ndvi_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'ndvi_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'ndvi_D_trs'] <- NA
+
+all_sites[all_sites$G_keep_post == FALSE, 'gcvi_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'gcvi_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'gcvi_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'gcvi_D_trs'] <- NA
+
+```
+
+
+## summary stats
+# Table 2
+
+```{r}
+site_groups <- unique(all_sites$Group)
+
+for (group in site_groups){
+  print(group)
+  valid_group_sites <- all_sites %>% filter(Group == group) %>% filter(evi2_valid_lsp_count >= 1)
+  print(nrow(valid_group_sites))
+  weed_sites <- all_sites %>% filter(Group == group) %>% filter(evi2_valid_lsp_count >= 1) %>% filter(truncated == T)
+  print(nrow(weed_sites))
+}
+```
+
+
+
+
+
+
+
+
+## within-pod comparison
+
+
+
+### calculate pod offsets from EVI2
+```{r}
+
+all_sites_temp <- all_sites
+
+cols_to_pivot <- c()
+
+
+
+
+base_vi <- 'evi2'
+other_vis <- c('ndvi', 'gcvi')
+metrics <- c('G_trs', 'M_trs', 'S_trs', 'D_trs')
+prefix <- 'd_Mark_'
+all_sites_temp <- add_cols(all_sites_temp, base_vi, other_vis, metrics, prefix)
+new_cols <- paste0(prefix, apply(expand.grid(other_vis, metrics), 1, paste, collapse="_"))
+cols_to_pivot <- c(cols_to_pivot, new_cols)
+
+base_vi <- 's2_evi2'
+other_vis <- c('s2_ndvi', 's2_gcvi')
+metrics <- c('G_trs', 'M_trs', 'S_trs', 'D_trs')
+prefix <- 'd_'
+all_sites_temp <- add_cols(all_sites_temp, base_vi, other_vis, metrics, prefix)
+new_cols <- paste0(prefix, apply(expand.grid(other_vis, metrics), 1, paste, collapse="_"))
+cols_to_pivot <- c(cols_to_pivot, new_cols)
+
+base_vi <- 'VIIRS_sr_evi2'
+other_vis <- c('VIIRS_sr_ndvi', 'VIIRS_sr_gcvi')
+metrics <- c('G_trs', 'M_trs', 'S_trs', 'D_trs')
+prefix <- 'd_'
+all_sites_temp <- add_cols(all_sites_temp, base_vi, other_vis, metrics, prefix)
+new_cols <- paste0(prefix, apply(expand.grid(other_vis, metrics), 1, paste, collapse="_"))
+cols_to_pivot <- c(cols_to_pivot, new_cols)
+
+base_vi <- 'GEE_s1_A_vh_vv_gf'
+other_vis <- c( 'GEE_s1_A_rvi_gf')
+metrics <- c('G_trs', 'M_trs', 'S_trs', 'D_trs')
+prefix <- 'd_'
+all_sites_temp <- add_cols(all_sites_temp, base_vi, other_vis, metrics, prefix)
+new_cols <- paste0(prefix, apply(expand.grid(other_vis, metrics), 1, paste, collapse="_"))
+cols_to_pivot <- c(cols_to_pivot, new_cols)
+
+
+
+
+```
+
+
+# Table S1 - LSP date comparison
+```{r}
+table_vi_order <- c('d_Mark_ndvi_evi2',
+                    'd_Mark_gcvi_evi2',
+                    'd_s2_ndvi_s2_evi2',
+                    'd_s2_gcvi_s2_evi2',
+                    'd_VIIRS_sr_ndvi_VIIRS_sr_evi2',
+                    'd_VIIRS_sr_gcvi_VIIRS_sr_evi2',
+                    'd_GEE_s1_A_rvi_gf_GEE_s1_A_vh_vv_gf')
+
+
+consist_table <- data.frame('vi' = table_vi_order)
+
+consist_table$G <- sapply(1:nrow(consist_table), function(k){
+  vi <- consist_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_G_trs')]], na.rm = T) 
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_G_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+consist_table$M <- sapply(1:nrow(consist_table), function(k){
+  vi <- consist_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_M_trs')]], na.rm = T) 
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_M_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+consist_table$S <- sapply(1:nrow(consist_table), function(k){
+  vi <- consist_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_S_trs')]], na.rm = T) 
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_S_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+consist_table$D <- sapply(1:nrow(consist_table), function(k){
+  vi <- consist_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_D_trs')]], na.rm = T) 
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_D_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+write.csv(consist_table, file = 'consist_table_TableSupp1.csv')
+```
+
+# Table S2 - sub-season duration
+```{r}
+table_vi_1 <- c('evi2',
+                'evi2',
+                's2_evi2',
+                's2_evi2',
+                'VIIRS_sr_evi2',
+                'VIIRS_sr_evi2',
+                'GEE_s1_A_vh_vv_gf')
+
+table_vi_2 <- c('ndvi',
+                'gcvi',
+                's2_ndvi',
+                's2_gcvi',
+                'VIIRS_sr_ndvi',
+                'VIIRS_sr_gcvi',
+                'GEE_s1_A_rvi_gf')
+
+dur_table <- data.frame('ref' = table_vi_1,
+                        'target' = table_vi_2)               
+
+
+dur_table$GtoM <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_M_trs')]] - all_sites_temp[[paste0(ref, '_G_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_M_trs')]] - all_sites_temp[[paste0(target, '_G_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+dur_table$MtoS <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_S_trs')]] - all_sites_temp[[paste0(ref, '_M_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_S_trs')]] - all_sites_temp[[paste0(target, '_M_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+dur_table$MtoD <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_D_trs')]] - all_sites_temp[[paste0(ref, '_M_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_D_trs')]] - all_sites_temp[[paste0(target, '_M_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+dur_table$GtoD <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_D_trs')]] - all_sites_temp[[paste0(ref, '_G_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_D_trs')]] - all_sites_temp[[paste0(target, '_G_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+write.csv(dur_table, file = 'dur_table_TableSupp2.csv')
+```
+
+
+## Satellite to Mark comp
+# calculate comparisons
+```{r}
+base_vi <- 'evi2'
+other_vis <- c('s2_evi2', 's2_ndvi', 's2_gcvi',
+               'VIIRS_sr_evi2', 'VIIRS_sr_ndvi', 'VIIRS_sr_gcvi',
+               'GEE_s1_A_vh_vv_gf', 'GEE_s1_A_rvi_gf', 
+               'VIIRS_lsp'
+               )
+metrics <- c('G_trs', 'M_trs', 'S_trs', 'D_trs')
+prefix <- 'd_Mark_'
+all_sites_temp <- add_cols(all_sites_temp, base_vi, other_vis, metrics, prefix)
+```
+
+
+# Table4 
+```{r}
+
+table_vi_order <- paste0('d_Mark_', other_vis, '_', base_vi)
+limited_vis <- c('s2_evi2', 'VIIRS_sr_evi2', 'GEE_s1_A_vh_vv_gf', 'VIIRS_lsp')
+
+mark_sat_table <- data.frame('vi' = table_vi_order)
+
+
+mark_sat_table$G <- sapply(1:nrow(mark_sat_table), function(k){
+  vi <- mark_sat_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_G_trs')]], na.rm = T) 
+  mark_valid <- nrow(all_sites_temp %>% filter(!is.na(paste0(base_vi, '_G_trs') )))
+  sensor_valid <-  all_sites_temp %>% filter(!is.na(paste0(base_vi, '_G_trs'))) %>% filter(!is.na(paste0(vi, '_G_trs') )) 
+  sensor_valid <- sensor_valid[sensor_valid[[paste0(vi, '_G_trs')]] <= 30, ] %>% nrow()
+  pct_valid <- round(100*(sensor_valid/mark_valid))
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_G_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+mark_sat_table$M <- sapply(1:nrow(mark_sat_table), function(k){
+  vi <- mark_sat_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_M_trs')]], na.rm = T) 
+  mark_valid <- nrow(all_sites_temp %>% filter(!is.na(paste0(base_vi, '_M_trs') )))
+  sensor_valid <-  all_sites_temp %>% filter(!is.na(paste0(base_vi, '_M_trs'))) %>% filter(!is.na(paste0(vi, '_M_trs') )) 
+  sensor_valid <- sensor_valid[sensor_valid[[paste0(vi, '_M_trs')]] <= 30, ] %>% nrow()
+  pct_valid <- round(100*(sensor_valid/mark_valid))
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_M_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+mark_sat_table$S <- sapply(1:nrow(mark_sat_table), function(k){
+  vi <- mark_sat_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_S_trs')]], na.rm = T) 
+  mark_valid <- nrow(all_sites_temp %>% filter(!is.na(paste0(base_vi, '_S_trs') )))
+  sensor_valid <-  all_sites_temp %>% filter(!is.na(paste0(base_vi, '_S_trs'))) %>% filter(!is.na(paste0(vi, '_S_trs') )) 
+  sensor_valid <- sensor_valid[sensor_valid[[paste0(vi, '_S_trs')]] <= 30, ] %>% nrow()
+  pct_valid <- round(100*(sensor_valid/mark_valid))
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_S_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+mark_sat_table$D <- sapply(1:nrow(mark_sat_table), function(k){
+  vi <- mark_sat_table$vi[k]
+  median_bias <- median(all_sites_temp[[paste0(vi, '_D_trs')]], na.rm = T) 
+  mark_valid <- nrow(all_sites_temp %>% filter(!is.na(paste0(base_vi, '_D_trs') )))
+  sensor_valid <-  all_sites_temp %>% filter(!is.na(paste0(base_vi, '_D_trs'))) %>% filter(!is.na(paste0(vi, '_D_trs') )) 
+  sensor_valid <- sensor_valid[sensor_valid[[paste0(vi, '_D_trs')]] <= 30, ] %>% nrow()
+  pct_valid <- round(100*(sensor_valid/mark_valid))
+  mad <- median(abs(all_sites_temp[[paste0(vi, '_D_trs')]]  - median_bias), na.rm = T)  %>% round(1)
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+write.csv(mark_sat_table, file = 'mark_satellite_comp_SSA.csv')
+mark_sat_table_limited <- mark_sat_table %>% filter(vi %in% paste0('d_Mark_', limited_vis, '_evi2'))
+write.csv(mark_sat_table_limited, file = 'mark_satellite_comp_SSA_limited_Table4.csv')
+
+```
+
+# Table 5
+
+```{r}
+
+table_vi_1 <- rep(base_vi, length(other_vis))
+table_vi_2 <- other_vis
+
+
+dur_table <- data.frame('ref' = table_vi_1,
+                        'target' = table_vi_2)               
+
+
+dur_table$GtoM <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  print(ref)
+  target <- dur_table$target[k]
+  print(target)
+  duration_ref <- (all_sites_temp[[paste0(ref, '_M_trs')]] - all_sites_temp[[paste0(ref, '_G_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_M_trs')]] - all_sites_temp[[paste0(target, '_G_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+
+dur_table$MtoS <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_S_trs')]] - all_sites_temp[[paste0(ref, '_M_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_S_trs')]] - all_sites_temp[[paste0(target, '_M_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+dur_table$MtoD <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_D_trs')]] - all_sites_temp[[paste0(ref, '_M_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_D_trs')]] - all_sites_temp[[paste0(target, '_M_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+dur_table$GtoD <- sapply(1:nrow(dur_table), function(k){
+  ref <- dur_table$ref[k]
+  target <- dur_table$target[k]
+  duration_ref <- (all_sites_temp[[paste0(ref, '_D_trs')]] - all_sites_temp[[paste0(ref, '_G_trs')]]) %>% as.numeric()
+  duration_target <- (all_sites_temp[[paste0(target, '_D_trs')]] - all_sites_temp[[paste0(target, '_G_trs')]]) %>% as.numeric()
+  
+  median_diff <- median(duration_target - duration_ref, na.rm = T)
+  mad <- median(abs((duration_target - duration_ref) - median_diff), na.rm = T)  %>% round(1)
+  a <- paste0(median_diff, ' (', mad, ')')
+})
+
+write.csv(dur_table, file = 'dur_table_mark_sat_ssa.csv')
+dur_table_limited <- dur_table %>% filter(target %in% limited_vis)
+write.csv(dur_table_limited, file = 'dur_table_mark_sat_ssa_limited_Table5.csv')
+```
+
+## Planting and Harvest offsets
+# Table 8
+
+## Planting date compared to G
+## Harvest date compared to D
+
+```{r}
+
+
+other_vis <- c('evi2', 'ndvi', 'gcvi',
+              's2_evi2', 's2_ndvi', 's2_gcvi',
+               'VIIRS_sr_evi2', 'VIIRS_sr_ndvi', 'VIIRS_sr_gcvi',
+               'GEE_s1_A_vh_vv_gf', 'GEE_s1_A_rvi_gf', 
+               'VIIRS_lsp'
+               )
+
+limited_vis <- c("evi2",
+                 "s2_evi2",
+                 "VIIRS_sr_evi2",
+                 "GEE_s1_A_vh_vv_gf",
+                 "VIIRS_lsp")
+mark_mgmt_table <- data.frame('vi' = other_vis)
+
+
+
+mark_mgmt_table$GtoPlanting <- sapply(1:nrow(mark_mgmt_table), function(k){
+  vi <- mark_mgmt_table$vi[k]
+  filt_data <- all_sites_temp %>% filter(!is.na(PlantingDate)) 
+  filt_data <- filt_data[!is.na(filt_data[[(paste0(vi, '_G_trs'))]]),  ]
+  filt_data$GtoPlanting <- as.numeric(as_date(filt_data[[paste0(vi, '_G_trs')]]) - as_date(filt_data$PlantingDate))
+  median_bias <- median(filt_data$GtoPlanting, na.rm = T) 
+  mad <- median(abs(filt_data$GtoPlanting - median_bias))
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+mark_mgmt_table$DtoHarvest <- sapply(1:nrow(mark_mgmt_table), function(k){
+  vi <- mark_mgmt_table$vi[k]
+  filt_data <- all_sites_temp %>% filter(!is.na(HarvestDate)) 
+  filt_data <- filt_data[!is.na(filt_data[[(paste0(vi, '_D_trs'))]]),  ]
+  filt_data$DtoHarvest <- as.numeric(as_date(filt_data[[paste0(vi, '_D_trs')]]) - as_date(filt_data$HarvestDate))
+  median_bias <- median(filt_data$DtoHarvest, na.rm = T) 
+  mad <- median(abs(filt_data$DtoHarvest - median_bias))
+  a <- paste0(median_bias, ' (', mad, ')')
+})
+
+write.csv(mark_mgmt_table, file = 'mark_mgmt_table.csv')
+mark_mgmt_table_limited <- mark_mgmt_table %>% filter(vi %in% limited_vis)
+write.csv(mark_mgmt_table_limited, file = 'mark_mgmt_table_limited_Table8.csv')
+
+
+```
+
+
+## RSQ satellites
+# include RENDIVI, etc
+# Tables 6, 7, S3
+## regression and rsquare for SSA sites with valid RF results
+```{r}
+
+## text size for plots
+global_size = 20
+
+## filter out sites that have valid random forest results (in evi2_predict_G_trs)
+## this makes sure the r square stats are for same set of observations
+
+all_sites_regress <- all_sites_temp %>% filter(group_cont == 'SSA') %>% filter(!is.na(evi2_predict_G_trs))
+
+
+
+mark_vi <- 'evi2'
+
+comp_vis <- c('s2_evi2', 's2_ndvi', 's2_gcvi',
+              'VIIRS_sr_evi2', 'VIIRS_sr_ndvi', 'VIIRS_sr_gcvi',
+               'GEE_s1_A_vh_vv_gf', 'GEE_s1_A_rvi_gf',
+              'VIIRS_lsp', 
+              'evi2_predict', 'evi2_predict_spline',
+              'satellite_median', 'satellite_mean',
+              "s2_RENDVI7",
+                 "s2_RENDVI6",
+                 "s2_RENDVI5",
+                 "s2_RE1",
+                 "s2_LCI",
+                 "s2_NDMI",
+                 "s2_NDWI",
+                 "s2_MSI")   
+
+limited_vis <- c("s2_evi2",
+                 "VIIRS_sr_evi2",
+                 "GEE_s1_A_vh_vv_gf",
+                 'evi2_predict',
+                 'evi2_predict_spline',
+                 'satellite_median', 
+                 'satellite_mean'
+                 )
+
+sensor_df_comp <- data.frame('vi' = c(comp_vis))
+
+sensor_df_comp$G_stats<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_G_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_G_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_G_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_G_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_G_trs'),
+                    paste0(mark_vi, '_G_trs') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+sensor_df_comp$M_stats<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_M_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_M_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_M_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_M_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_M_trs'),
+                    paste0(mark_vi, '_M_trs') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+sensor_df_comp$S_stats<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_S_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_S_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_S_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_S_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_S_trs'),
+                    paste0(mark_vi, '_S_trs') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+sensor_df_comp$D_stats<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+ # print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_D_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_D_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_D_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_D_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_D_trs'),
+                    paste0(mark_vi, '_D_trs') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+
+
+sensor_df_comp$G_rsq<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+ # print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_G_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_G_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_G_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_G_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_G_trs'),
+                    paste0(mark_vi, '_G_trs') )
+  rsq <- p[[4]]
+  return(rsq)
+})
+
+
+
+sensor_df_comp$M_rsq<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_M_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_M_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_M_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_M_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_M_trs'),
+                    paste0(mark_vi, '_M_trs') )
+  rsq <- p[[4]]
+  return(rsq)
+})
+
+sensor_df_comp$S_rsq<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_S_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_S_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_S_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_S_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_S_trs'),
+                    paste0(mark_vi, '_S_trs') )
+  rsq <- p[[4]]
+  return(rsq)
+})
+
+
+sensor_df_comp$D_rsq<- sapply(1:nrow(sensor_df_comp), function(x){
+  vi <- sensor_df_comp$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0(mark_vi, '_D_trs')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_D_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_D_trs'))]]) - as_date(comp_data[[paste0(mark_vi, '_D_trs') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_D_trs'),
+                    paste0(mark_vi, '_D_trs') )
+  rsq <- p[[4]]
+  return(rsq)
+})
+
+
+sensor_df_comp$avg_rsq <- rowMeans(sensor_df_comp[,c("G_rsq", "M_rsq", "S_rsq", "D_rsq")])
+
+sensor_df_comp$avg_rsq <- round(sensor_df_comp$avg_rsq, 2)
+sensor_df_comp$G_rsq <- round(sensor_df_comp$G_rsq, 2)
+sensor_df_comp$M_rsq <- round(sensor_df_comp$M_rsq, 2)
+sensor_df_comp$S_rsq <- round(sensor_df_comp$S_rsq, 2)
+sensor_df_comp$D_rsq <- round(sensor_df_comp$D_rsq, 2)
+
+
+write.csv(sensor_df_comp, file = 'sensor_df_comp_lsp_dates_RF_SSA_TableS3.csv')
+sensor_df_comp_limited <- sensor_df_comp %>% filter(vi %in% limited_vis)
+write.csv(sensor_df_comp_limited, file = 'sensor_df_comp_limited_Table6_7.csv')
+```
+
+## RSQ planting and harvest
+# Table 9, S4
+```{r}
+sensor_df_comp_mgmt <- data.frame('vi' = c(comp_vis))
+
+sensor_df_comp_mgmt$Pdate_stats<- sapply(1:nrow(sensor_df_comp_mgmt), function(x){
+  vi <- sensor_df_comp_mgmt$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0('PlantingDate')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_G_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_G_trs'))]]) - as_date(comp_data[[paste0('PlantingDate') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_G_trs'),
+                    paste0('PlantingDate') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+
+sensor_df_comp_mgmt$Pdate_rsq<- sapply(1:nrow(sensor_df_comp_mgmt), function(x){
+  vi <- sensor_df_comp_mgmt$vi[x]
+#  print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0('PlantingDate')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_G_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_G_trs'))]]) - as_date(comp_data[[paste0('PlantingDate') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_G_trs'),
+                    paste0('PlantingDate') )
+  rsq <- p[[4]]
+  return(round(rsq, 2))
+})
+
+
+sensor_df_comp_mgmt$Hdate_stats<- sapply(1:nrow(sensor_df_comp_mgmt), function(x){
+  vi <- sensor_df_comp_mgmt$vi[x]
+ # print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0('HarvestDate')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_D_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_D_trs'))]]) - as_date(comp_data[[paste0('HarvestDate') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_D_trs'),
+                    paste0('HarvestDate') )
+  rsq <- p[[4]]
+  n <- p[[3]]
+  pct <- round(100*(n/valid_count))
+  p_val <- p[[5]]
+  text <- paste0(round(rsq, 2), ' (', round(p_val,5), ') ' )
+  return(text)
+})
+
+
+sensor_df_comp_mgmt$Hdate_rsq<- sapply(1:nrow(sensor_df_comp_mgmt), function(x){
+  vi <- sensor_df_comp_mgmt$vi[x]
+ # print(vi)
+  valid_sites <- all_sites_regress %>% filter(!is.na(!!sym(paste0('HarvestDate')) ))
+  valid_count <- nrow(valid_sites)
+  comp_data <- valid_sites  %>% filter(!is.na(!!sym(paste0(vi, '_D_trs')) ))
+  final_count <- nrow(comp_data)
+  comp_data$delta <- (as_date(comp_data[[(paste0(vi, '_D_trs'))]]) - as_date(comp_data[[paste0('HarvestDate') ]])) %>% as.numeric()
+  p <- regress_dates(comp_data, 
+                    'start_date_mark',
+                    paste0(vi, '_D_trs'),
+                    paste0('HarvestDate') )
+  rsq <- p[[4]]
+  return(round(rsq, 2))
+})
+
+write.csv(sensor_df_comp_mgmt, file = 'sensor_df_comp_mgmt_RF_SSA_TableS4.csv')
+sensor_df_comp_mgmt_limited <- sensor_df_comp_mgmt %>% filter(vi %in% limited_vis)
+write.csv(sensor_df_comp_mgmt_limited, file = 'sensor_df_comp_mgmt_limited_Table9.csv')
+
+
+```
+
+
+## accuracy by radius
+-- start from 0, make this continuous, some key thresholds like 50%
+# Figure 4 (satellite)
+
+```{r}
+## GREENUP
+radius_data <- all_sites_temp[,c("d_Mark_s2_evi2_evi2_G_trs",
+                                 "d_Mark_GEE_s1_A_vh_vv_gf_evi2_G_trs",
+                                 "d_Mark_VIIRS_sr_evi2_evi2_G_trs",
+                                 "d_Mark_VIIRS_lsp_evi2_G_trs")]
+
+new_column_names <- c("d_Mark_s2_evi2_evi2_G_trs" = "Sentinel-2 EVI2",
+                      "d_Mark_GEE_s1_A_vh_vv_gf_evi2_G_trs" = "Sentinel-1 CR",
+                      "d_Mark_VIIRS_sr_evi2_evi2_G_trs" = "VIIRS EVI2",
+                      "d_Mark_VIIRS_lsp_evi2_G_trs" = "VIIRS LCD")
+names(radius_data) <- new_column_names
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("Sentinel-2 EVI2",
+                           "Sentinel-1 CR",
+                           "VIIRS EVI2",
+                           "VIIRS LCD"), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  filt_obs <- radius_data[[current_vi]]
+  filt_obs <- filt_obs[!is.na(filt_obs)]
+  bias <- median(filt_obs)
+  abs_deviation <- abs(filt_obs - bias)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+
+# Define colors based on the column names
+color_mapping <- c("Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_G <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Greenup")
+
+## MATURITY
+radius_data <- all_sites_temp[,c("d_Mark_s2_evi2_evi2_M_trs",
+                                 "d_Mark_GEE_s1_A_vh_vv_gf_evi2_M_trs",
+                                 "d_Mark_VIIRS_sr_evi2_evi2_M_trs",
+                                 "d_Mark_VIIRS_lsp_evi2_M_trs")]
+
+new_column_names <- c("d_Mark_s2_evi2_evi2_M_trs" = "Sentinel-2 EVI2",
+                      "d_Mark_GEE_s1_A_vh_vv_gf_evi2_M_trs" = "Sentinel-1 CR",
+                      "d_Mark_VIIRS_sr_evi2_evi2_M_trs" = "VIIRS EVI2",
+                      "d_Mark_VIIRS_lsp_evi2_M_trs" = "VIIRS LCD")
+names(radius_data) <- new_column_names
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("Sentinel-2 EVI2",
+                           "Sentinel-1 CR",
+                           "VIIRS EVI2",
+                           "VIIRS LCD"), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  filt_obs <- radius_data[[current_vi]]
+  filt_obs <- filt_obs[!is.na(filt_obs)]
+  bias <- median(filt_obs)
+  abs_deviation <- abs(filt_obs - bias)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+
+# Define colors based on the column names
+color_mapping <- c("Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_M <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Maturity")
+
+
+## SENESCENCE
+radius_data <- all_sites_temp[,c("d_Mark_s2_evi2_evi2_S_trs",
+                                 "d_Mark_GEE_s1_A_vh_vv_gf_evi2_S_trs",
+                                 "d_Mark_VIIRS_sr_evi2_evi2_S_trs",
+                                 "d_Mark_VIIRS_lsp_evi2_S_trs")]
+
+new_column_names <- c("d_Mark_s2_evi2_evi2_S_trs" = "Sentinel-2 EVI2",
+                      "d_Mark_GEE_s1_A_vh_vv_gf_evi2_S_trs" = "Sentinel-1 CR",
+                      "d_Mark_VIIRS_sr_evi2_evi2_S_trs" = "VIIRS EVI2",
+                      "d_Mark_VIIRS_lsp_evi2_S_trs" = "VIIRS LCD")
+names(radius_data) <- new_column_names
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("Sentinel-2 EVI2",
+                           "Sentinel-1 CR",
+                           "VIIRS EVI2",
+                           "VIIRS LCD"), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  filt_obs <- radius_data[[current_vi]]
+  filt_obs <- filt_obs[!is.na(filt_obs)]
+  bias <- median(filt_obs)
+  abs_deviation <- abs(filt_obs - bias)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+
+# Define colors based on the column names
+color_mapping <- c("Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_S <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Senescence")
+
+## DORMANCY
+radius_data <- all_sites_temp[,c("d_Mark_s2_evi2_evi2_D_trs",
+                                 "d_Mark_GEE_s1_A_vh_vv_gf_evi2_D_trs",
+                                 "d_Mark_VIIRS_sr_evi2_evi2_D_trs",
+                                 "d_Mark_VIIRS_lsp_evi2_D_trs")]
+
+new_column_names <- c("d_Mark_s2_evi2_evi2_D_trs" = "Sentinel-2 EVI2",
+                      "d_Mark_GEE_s1_A_vh_vv_gf_evi2_D_trs" = "Sentinel-1 CR",
+                      "d_Mark_VIIRS_sr_evi2_evi2_D_trs" = "VIIRS EVI2",
+                      "d_Mark_VIIRS_lsp_evi2_D_trs" = "VIIRS LCD")
+names(radius_data) <- new_column_names
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("Sentinel-2 EVI2",
+                           "Sentinel-1 CR",
+                           "VIIRS EVI2",
+                           "VIIRS LCD"), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  filt_obs <- radius_data[[current_vi]]
+  filt_obs <- filt_obs[!is.na(filt_obs)]
+  bias <- median(filt_obs)
+  abs_deviation <- abs(filt_obs - bias)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+
+# Define colors based on the column names
+color_mapping <- c("Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_D <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Dormancy")
+
+
+png('valid_by_radius_lsp_dates_Figure4.png',
+    width = 1200,
+    height = 1200)
+cowplot::plot_grid(plotlist = list(p_G, p_M, p_S, p_D),
+                   byrow = T,
+                   nrow = 2)
+dev.off()
+
+
+```
+
+# Figure 6 (planting/harvest)
+
+```{r}
+
+get_abs_deviations_Planting <- function(vi){
+  filt_data <- all_sites_temp %>% filter(!is.na(PlantingDate)) 
+  filt_data <- filt_data[!is.na(filt_data[[(paste0(vi, '_G_trs'))]]),  ]
+  filt_data$GtoPlanting <- as.numeric(as_date(filt_data[[paste0(vi, '_G_trs')]]) - as_date(filt_data$PlantingDate))
+  median_bias <- median(filt_data$GtoPlanting, na.rm = T) 
+  ad <- abs(filt_data$GtoPlanting - median_bias)
+  return(ad)
+}
+
+get_abs_deviations_Harvest<- function(vi){
+  filt_data <- all_sites_temp %>% filter(!is.na(HarvestDate)) 
+  filt_data <- filt_data[!is.na(filt_data[[(paste0(vi, '_D_trs'))]]),  ]
+  filt_data$DtoHarvest <- as.numeric(as_date(filt_data[[paste0(vi, '_D_trs')]]) - as_date(filt_data$HarvestDate))
+  median_bias <- median(filt_data$DtoHarvest, na.rm = T) 
+  ad <- abs(filt_data$DtoHarvest - median_bias)
+  return(ad)
+}
+
+
+## PLANTING DATE
+
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("evi2",
+                                  "s2_evi2",
+                                 "GEE_s1_A_vh_vv_gf",
+                                 "VIIRS_sr_evi2",
+                                 "VIIRS_lsp"
+                                  ), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  abs_deviation <- get_abs_deviations_Planting(current_vi)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+new_column_names <- c("evi2" = "Mark EVI2",
+                      "s2_evi2" = "Sentinel-2 EVI2",
+                      "GEE_s1_A_vh_vv_gf" = "Sentinel-1 CR",
+                      "VIIRS_sr_evi2" = "VIIRS EVI2",
+                      "VIIRS_lsp" = "VIIRS LCD")
+
+plot_data$VI <- new_column_names[plot_data$VI]
+
+# Define colors based on the column names
+color_mapping <- c("Mark EVI2" = "orange",
+                   "Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Mark EVI2",
+                                  "Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_P <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Planting")
+
+
+## HARVEST DATE
+
+
+radii <- seq(1, 60)
+
+plot_data <- expand.grid("VI" = c("evi2",
+                                  "s2_evi2",
+                                 "GEE_s1_A_vh_vv_gf",
+                                 "VIIRS_sr_evi2",
+                                 "VIIRS_lsp"
+                                  ), 
+                         "days" = radii,
+                         stringsAsFactors = F)
+
+plot_data$percent <- sapply(1:nrow(plot_data), function(x){
+  current_vi <- plot_data$VI[x]
+  current_radius <- plot_data$days[x]
+  abs_deviation <- get_abs_deviations_Harvest(current_vi)
+  percent <- 100*(sum(abs_deviation <= current_radius)/length(abs_deviation))
+})
+
+new_column_names <- c("evi2" = "Mark EVI2",
+                      "s2_evi2" = "Sentinel-2 EVI2",
+                      "GEE_s1_A_vh_vv_gf" = "Sentinel-1 CR",
+                      "VIIRS_sr_evi2" = "VIIRS EVI2",
+                      "VIIRS_lsp" = "VIIRS LCD")
+
+plot_data$VI <- new_column_names[plot_data$VI]
+
+# Define colors based on the column names
+color_mapping <- c("Mark EVI2" = "orange",
+                   "Sentinel-2 EVI2" = "green", 
+                   "VIIRS EVI2" = "blue", 
+                   "VIIRS LCD" = "grey",
+                   "Sentinel-1 CR" = "red")
+
+plot_data$color <- color_mapping[plot_data$VI]
+
+plot_data$VI <- factor(plot_data$VI, 
+                       levels = c("Mark EVI2",
+                                  "Sentinel-2 EVI2",
+                                  "VIIRS EVI2",
+                                  "VIIRS LCD",
+                                  "Sentinel-1 CR"))
+
+# Create the ggplot
+p_H <- ggplot(plot_data) +
+  geom_line(aes(x = days, y = percent, color = VI), lwd = 1.5, alpha = 0.5) +
+  scale_color_manual(values = color_mapping) + 
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 20),  # Major breaks every 20 units
+    minor_breaks = seq(0, 100, by = 10),  # Minor breaks every 10 units
+    limits = c(0, 100)  # Set y-axis limits
+  )  + ylab("% Proximate") +
+  theme_bw(base_size = global_size)   + ggtitle("Harvest")
+
+png('valid_by_radius_mgmt_mark_sites_Figure6.png',
+    width = 1200,
+    height = 600)
+cowplot::plot_grid(plotlist = list(p_P, p_H),
+                   byrow = T,
+                   nrow = 1)
+dev.off()
+
+
+```
+
