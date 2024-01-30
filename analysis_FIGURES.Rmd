@@ -1,0 +1,557 @@
+---
+title: "Pod work"
+author: "Mike Cecil"
+date: "2023-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Figures
+
+This script performs the following processing steps
+- The script creates two visual figures for the paper
+- The first figure is the paper workflow figure showing how weeding removal, padding, and LSP date extraction work.
+- The second figure shows a scatterplot for season duration of Mark compared to Sentinel-2 and VIIRS, as well as an example time-series for Mark, Sentinel-2, and VIIRS for one site.
+
+```{r}
+library(dplyr)
+#library(randomForest)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(Rcpp)
+library(phenofit)
+library(zoo)
+library(here)
+library(terra)
+library(scorepeak)
+library(ranger)
+library(pspline)
+library(rlang)
+library(lmodel2)
+```
+
+```{r}
+add_fine_fit_vi <- function(obs, vi_col_fitted){
+  df <- obs
+
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+  
+  df <- df %>% filter(!is.na(ndvi_pad_fitted))
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark_15 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.15))
+  dates_indices_mark_90 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.90))
+  dates_indices_mark <- c(dates_indices_mark_15[1], 
+                          dates_indices_mark_90[1],
+                          dates_indices_mark_90[2],
+                          dates_indices_mark_15[2])
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+  obs[[paste0(vi_col_fitted, "_fine_fit")]] <- ndvi_beck
+  return(list(obs, dates_mark))
+}
+
+calculate_Beck_plot_return_dates_trs <- function(df, 
+                                             vi_col,
+                                             vi_col_fitted,
+                                             location){
+  
+  
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+  
+  df <- df %>% filter(!is.na(ndvi_pad_fitted))
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- 'ndvi_pad_fitted'
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  dates_indices_mark_15 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.15))
+  dates_indices_mark_90 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.90))
+  dates_indices_mark <- c(dates_indices_mark_15[1], 
+                          dates_indices_mark_90[1],
+                          dates_indices_mark_90[2],
+                          dates_indices_mark_15[2])
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  colors <- c(`good` = 'green',
+             `maybe` = 'yellow4',
+             `no` = 'red')
+  
+  if(!("quality_band" %in% colnames(df)) ){
+    df$quality_band <- 'good'
+  }
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  # geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+ #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+   geom_point(aes(x = date, y = ndvi_pad, col = quality_band), alpha = 0.5) +
+    scale_color_manual(values = colors) +
+
+    geom_line(aes(x = date, y = ndvi_pad_fitted), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'blue') +
+    theme_bw() +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0('TRS ',location, ' ', dates_collapse_mark))
+#  plot(p)
+  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+
+rescaleVect <- function(columnVect){
+  min_vect <- min(columnVect, na.rm = T)
+  max_vect <- max(columnVect, na.rm = T)
+  transformedVect <- (columnVect - min_vect) * (0.8/(max_vect - min_vect)) + 0.1
+}
+
+```
+
+
+## individual figures
+# Workflow (Figure 2) .... should almost be a video...
+
+```{r}
+load(file = here('data/data_kenya_split.rda'))
+data_before_weeding <- data
+load(file = here('data_post_rf_mean_median.rda'))
+data_after_weeding <- data
+load(file = here('all_sites_post_rf_mean_median.rda'))
+```
+
+
+```{r}
+
+weeding_sites <- all_sites %>% filter(truncated == TRUE) %>% pull(Location)
+
+global_size = 20
+
+for (plot_site in weeding_sites){
+  print(plot_site)
+  obs_before_trunc <- data_before_weeding %>% filter(Location == plot_site)
+  obs_after_trunc <- data_after_weeding %>% filter(Location == plot_site)
+  start_date <- min(obs_before_trunc$date)
+  end_date <- max(obs_before_trunc$date)
+  
+  p1 <- ggplot() + 
+    geom_point(data = obs_before_trunc, aes(x = date, y = ndvi), col = 'green', size = 3) +
+    geom_point(data = obs_after_trunc, aes(x = date, y = ndvi), col = 'orange', size = 3) + 
+
+    theme_bw(base_size = global_size) + ggtitle("(A) Identify outliers and weeding events") +
+    ylim(0,1) + xlim(start_date, end_date) + ylab('Mark NDVI')
+  plot(p1)
+  
+  p2 <- ggplot() + 
+    geom_line(data = obs_after_trunc, aes(x = date, y = ndvi_pad_fitted), col = 'grey', lwd = 3) + 
+    geom_point(data = obs_after_trunc, aes(x = date, y = ndvi_pad), col = 'orange', size = 3, alpha = 0.5) + 
+    theme_bw(base_size = global_size) + ggtitle("(B) Add padding and rough fit") +
+    ylim(0,1) + xlim(start_date, end_date) + ylab('Mark NDVI')
+  plot(p2)
+  
+  results <- add_fine_fit_vi(obs_after_trunc, 'ndvi_pad_fitted')
+  obs_after_trunc <- results[[1]]
+  dates_mark <- results [[2]]
+  
+  p3 <- ggplot() + 
+    geom_line(data = obs_after_trunc, aes(x = date, y = ndvi_pad_fitted), col = 'grey', alpha = 0.5, lwd = 3) + 
+    geom_point(data = obs_after_trunc, aes(x = date, y = ndvi_pad), col = 'orange', alpha = 0.25, size = 3) + 
+    geom_line(data = obs_after_trunc, aes(x = date, y = ndvi_pad_fitted_fine_fit), col = 'blue', alpha = 1, lwd = 3) +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen", lwd = 2) +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen", lwd = 2) +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2", lwd = 2) +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3", lwd = 2) +
+    annotate("label", x = dates_mark[1], y = 1,
+                          label = "Mark G", size = 6) + 
+    annotate("label", x = dates_mark[2], y = 0.9,
+                          label = "Mark M", size = 6) + 
+    annotate("label", x = dates_mark[3], y = 1,
+                          label = "Mark S", size = 6) + 
+    annotate("label", x = dates_mark[4], y = 0.9,
+                          label = "Mark D", size = 6) + 
+    theme_bw(base_size = global_size) + ggtitle("(C) Fine fit and extract LSP dates") +
+    ylim(0,1) + xlim(start_date, end_date) + ylab('Mark NDVI')
+  plot(p3)
+  
+  results <- add_fine_fit_vi(obs_after_trunc, 's2_ndvi_fitted')
+  obs_after_trunc <- results[[1]]
+  dates_s2 <- results [[2]]
+  
+  p4 <- ggplot() + 
+    geom_line(data = obs_after_trunc, aes(x = date, y = s2_ndvi_fitted), col = 'grey', alpha = 0.75, lwd = 3, linetype="dashed") + 
+    geom_line(data = obs_after_trunc, aes(x = date, y = s2_ndvi_fitted_fine_fit), col = 'blue', alpha = 3, lwd = 3, linetype="dashed") +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", color = "lightgreen", lwd = 2, alpha = 0.5) +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", color = "darkgreen", lwd = 2, alpha = 0.5 ) +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", color = "yellow2", lwd = 2, alpha = 0.5) +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", color = "orange3", lwd = 2, alpha = 0.5) +
+    geom_vline(xintercept= dates_s2[1], linetype="dashed", color = "lightgreen", lwd = 2) +
+    geom_vline(xintercept= dates_s2[2], linetype="dashed", color = "darkgreen", lwd = 2 ) +
+    geom_vline(xintercept= dates_s2[3], linetype="dashed", color = "yellow2", lwd = 2) +
+    geom_vline(xintercept= dates_s2[4], linetype="dashed", color = "orange3", lwd = 2) +
+    geom_point(data = obs_after_trunc, aes(x = date, y = s2_ndvi), col = 'purple', alpha = 0.5, size = 3) + 
+    annotate("label", x = dates_s2[1], y = 1,
+                          label = "S2 G", size = 6) + 
+    annotate("label", x = dates_s2[2], y = 0.9,
+                          label = "S2 M", size = 6) + 
+    annotate("label", x = dates_s2[3], y = 1,
+                          label = "S2 S", size = 6) + 
+    annotate("label", x = dates_s2[4], y = 0.9,
+                          label = "S2 D", size = 6) + 
+
+    theme_bw(base_size = global_size) + ggtitle("(D) Compare Mark and satellite LSP") +
+    ylim(0,1) + xlim(start_date, end_date) + ylab('Sentinel-2 NDVI')
+  plot(p4)
+  
+  all_plots <- cowplot::plot_grid(plotlist = list(p1, p2, p3, p4),
+                   byrow = T,
+                   nrow = 2)
+  png(here(paste0('workflow_plot_', plot_site, '.png')), width = 1200, height = 1200)
+  print(all_plots)
+  dev.off()
+  
+}
+
+```
+
+
+
+```{r}
+
+weeding_sites <- all_sites %>% filter(truncated == TRUE) %>% pull(Location)
+
+global_size = 20
+
+
+  
+all_sites$mark_evi2_G_D <- (all_sites$evi2_D_trs - all_sites$evi2_G_trs) %>% as.numeric()
+all_sites$s2_evi2_G_D <- (all_sites$s2_evi2_D_trs - all_sites$s2_evi2_G_trs) %>% as.numeric()
+all_sites$viirs_evi2_G_D <- (all_sites$VIIRS_sr_evi2_D_trs - all_sites$VIIRS_sr_evi2_G_trs) %>% as.numeric()
+
+new_names <- c("s2_evi2_G_D" = "Sentinel-2",
+               "viirs_evi2_G_D" = "VIIRS" )
+  
+colors <- c("Sentinel-2" = "green",
+              "VIIRS" = "blue")
+  
+  
+all_sites_long <- pivot_longer(all_sites,
+                               cols = c(s2_evi2_G_D, viirs_evi2_G_D))
+all_sites_long$name <- new_names[all_sites_long$name]
+
+
+p1 <- ggplot(all_sites_long) +
+    geom_abline(intercept = 0, slope = 1, col = 'red') +
+    geom_abline(intercept = 40, slope = 1, col = 'green', linetype = 'dashed') +
+    geom_abline(intercept = 65, slope = 1, col = 'blue', linetype = 'dashed') +
+    geom_point(aes(x = mark_evi2_G_D, y = value, color = name), alpha = 0.5) +
+    scale_color_manual(values = colors) +
+    guides(color = guide_legend(title = "Sensor")) +
+    theme_bw(base_size = global_size) +
+    theme(legend.position = c(0.2, 0.88), 
+        legend.box.background = element_rect(fill = "white", color = "black"),
+        legend.box.margin = margin(1, 1, 1, 1)) + 
+    xlim(0,400) +
+    ylim(0,400)   +
+    ylab('Sensor (days)') + 
+    xlab('Mark (days)') +
+    ggtitle('Season duration comparison') + 
+    theme(aspect.ratio = 1)
+  
+
+for (plot_site in weeding_sites){
+  print(plot_site)
+
+  
+  obs_before_trunc <- data_before_weeding %>% filter(Location == plot_site)
+  obs_after_trunc <- data_after_weeding %>% filter(Location == plot_site)
+  start_date <- min(obs_before_trunc$date)
+  end_date <- max(obs_before_trunc$date)
+  
+  
+  test_site_data <- data_after_weeding %>% filter(Location == plot_site)
+  test_site_data$date <- as_date(test_site_data$date)
+  test_site_data$evi2_pad_fitted <- as.numeric(test_site_data$evi2_pad_fitted)
+  test_site_data$evi2<- as.numeric(test_site_data$evi2)
+  
+  test_site_data$s2_evi2_fitted <- as.numeric(test_site_data$s2_evi2_fitted)
+  test_site_data$s2_evi2<- as.numeric(test_site_data$s2_evi2)
+  test_site_data$VIIRS_sr_evi2_fitted <- as.numeric(test_site_data$VIIRS_sr_evi2_fitted)
+  test_site_data$VIIRS_sr_evi2<- as.numeric(test_site_data$VIIRS_sr_evi2)
+  
+  vars_to_rescale <- c('s2_evi2', 'evi2', 'evi2_pad', 'VIIRS_sr_evi2',
+                       's2_evi2_fitted', 'evi2_pad_fitted', 'VIIRS_sr_evi2_fitted')
+  
+  for (var in vars_to_rescale){
+    test_site_data[[var]] <- rescaleVect(test_site_data[[var]])
+  }
+  
+  
+  test_site_data_long = pivot_longer(test_site_data,
+                                     cols = c(evi2_pad_fitted, s2_evi2_fitted, VIIRS_sr_evi2_fitted))
+  
+  new_names <- c("evi2_pad_fitted" = "Mark EVI2" ,
+                 "s2_evi2_fitted" = "Sentinel-2 EVI2" ,
+                 "VIIRS_sr_evi2_fitted" = "VIIRS EVI2")
+  test_site_data_long$name <- new_names[test_site_data_long$name]
+  
+  raw_data_long <- pivot_longer(test_site_data,
+                                cols = c(evi2_pad, s2_evi2, VIIRS_sr_evi2))
+  
+  new_names <- c( "evi2_pad" = "Mark EVI2",
+                  "s2_evi2" = "Sentinel-2 EVI2",
+                  "VIIRS_sr_evi2" = "VIIRS EVI2" )
+  raw_data_long$name <- new_names[raw_data_long$name]
+  
+  colors <- c("Mark EVI2" = "orange",
+              "Sentinel-2 EVI2" = "green",
+              "VIIRS EVI2" = "blue")
+  
+  plot_site_index <- which(all_sites$Location == plot_site)
+  
+  mark_lsp_dates <- c(all_sites$evi2_G_trs[plot_site_index],
+                      all_sites$evi2_M_trs[plot_site_index],
+                      all_sites$evi2_S_trs[plot_site_index],
+                      all_sites$evi2_D_trs[plot_site_index])
+  
+  if(NA %in% mark_lsp_dates){
+    next
+  }
+  mark_lsp <- test_site_data %>% filter(date %in% mark_lsp_dates)
+  mark_lsp$LSP_label <- c("G", "M", "S", "D")
+  
+  s2_lsp_dates <- c(all_sites$s2_evi2_G_trs[plot_site_index],
+                    all_sites$s2_evi2_M_trs[plot_site_index],
+                    all_sites$s2_evi2_S_trs[plot_site_index],
+                    all_sites$s2_evi2_D_trs[plot_site_index])
+  s2_lsp <- test_site_data %>% filter(date %in% s2_lsp_dates)
+  s2_lsp$LSP_label <- c("G", "M", "S", "D")
+  
+  viirs_lsp_dates <- c(all_sites$VIIRS_sr_evi2_G_trs[plot_site_index],
+                       all_sites$VIIRS_sr_evi2_M_trs[plot_site_index],
+                       all_sites$VIIRS_sr_evi2_S_trs[plot_site_index],
+                       all_sites$VIIRS_sr_evi2_D_trs[plot_site_index])
+  viirs_lsp <- test_site_data %>% filter(date %in% viirs_lsp_dates)
+  viirs_lsp$LSP_label <- c("G", "M", "S", "D")
+
+
+p2 <- ggplot(data = test_site_data_long) +
+    geom_point(data = raw_data_long, aes(x = date, y = value, color = name), alpha = 0.5) +
+    geom_line(aes(x = date, y= value, color = name), alpha = 0.5) + 
+    theme_bw(base_size = global_size) +ylim(0,1) + scale_color_manual(values = colors) +
+    ylab("Rescaled EVI2") + ggtitle(paste0("Multi-sensor LSP comparison")) +
+    geom_point(data = mark_lsp, aes(x = date, y = evi2_pad_fitted), size = 5, color = "orange") +
+    geom_point(data = s2_lsp, aes(x = date, y = s2_evi2_fitted), size = 5, color = "green") +
+    geom_point(data = viirs_lsp, aes(x = date, y = VIIRS_sr_evi2_fitted), size = 5, color = "blue", alpha = 0.5) +
+    geom_text(data = mark_lsp, aes(x = date, y = evi2_pad_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+    geom_text(data = s2_lsp, aes(x = date, y = s2_evi2_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+    geom_text(data = viirs_lsp, aes(x = date, y = VIIRS_sr_evi2_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+    guides(color = guide_legend(title = "Sensor VI")) + theme(aspect.ratio = 1) +
+    theme( legend.position = c(0.2, 0.88),  # Adjust the position (x, y) as needed
+  legend.box.background = element_rect(fill = "white", color = "black"),
+  legend.box.margin = margin(1, 1, 1, 1))
+  
+  
+  all_plots <- cowplot::plot_grid(plotlist = list(p1, p2),
+                   byrow = T,
+                   nrow = 2,
+                   align = 'vh',
+                   axis = 'rlbt')
+  png(here(paste0('example_plot_', plot_site, '.png')), width = 800, height = 1200)
+  print(all_plots)
+  dev.off()
+  
+  
+}
+```
+
+# padding (Figure 1)
+# weeding (Supp)
+
+
+```{r}
+
+s2_cols_sites <- names(all_sites)[substr(names(all_sites), 1, 7) == 'DEA_s2_']
+for(s2_col in s2_cols_sites){
+  new_col_name <- str_replace(s2_col, 'DEA_s2_', 's2_')
+  all_sites[[new_col_name]] <- all_sites[[s2_col]]
+}
+
+date_cols <- names(all_sites)[grepl('_trs', names(all_sites))]
+for (col in date_cols){
+  all_sites[[col]] <- as_date(all_sites[[col]])
+}
+
+
+
+all_sites$mark_evi2_M_S <- (all_sites$evi2_S_trs - all_sites$evi2_M_trs) %>% as.numeric()
+all_sites$s2_evi2_M_S <- (all_sites$s2_evi2_S_trs - all_sites$s2_evi2_M_trs) %>% as.numeric()
+all_sites$viirs_evi2_M_S <- (all_sites$VIIRS_sr_evi2_S_trs - all_sites$VIIRS_sr_evi2_M_trs) %>% as.numeric()
+
+all_sites$mark_evi2_G_D <- (all_sites$evi2_D_trs - all_sites$evi2_G_trs) %>% as.numeric()
+all_sites$s2_evi2_G_D <- (all_sites$s2_evi2_D_trs - all_sites$s2_evi2_G_trs) %>% as.numeric()
+all_sites$viirs_evi2_G_D <- (all_sites$VIIRS_sr_evi2_D_trs - all_sites$VIIRS_sr_evi2_G_trs) %>% as.numeric()
+all_sites$s1_cr_G_D <- (all_sites$GEE_s1_A_vh_vv_gf_D_trs - all_sites$GEE_s1_A_vh_vv_gf_G_trs) %>% as.numeric()
+all_sites$VIIRS_lsp_G_D <- (all_sites$VIIRS_lsp_D_trs - all_sites$VIIRS_lsp_G_trs) %>% as.numeric()
+#all_sites$s2_evi2_ndvi_diff_M_S <- all_sites$s2_ndvi_M_S - all_sites$s2_evi2_M_S 
+#View(all_sites[,c("Location", "mark_evi2_M_S", "s2_evi2_M_S", "viirs_evi2_M_S")])
+
+p1 <- ggplot(all_sites) +
+    geom_abline(intercept = 0, slope = 1, col = 'red') +
+      geom_abline(intercept = 35, slope = 1, col = 'green', linetype = 'dashed') +
+        geom_abline(intercept = 61, slope = 1, col = 'blue', linetype = 'dashed') +
+
+
+  geom_point(aes(x = mark_evi2_G_D, y = s2_evi2_G_D), col = 'green', alpha = 0.5) +
+  geom_point(aes(x = mark_evi2_G_D, y = viirs_evi2_G_D), col = 'blue', alpha = 0.5) +
+#  geom_point(aes(x = mark_evi2_G_D, y = s1_cr_G_D), col = 'red', alpha = 0.3) +
+ # geom_point(aes(x = mark_evi2_G_D, y = VIIRS_lsp_G_D), col = 'grey', alpha = 0.3) +
+
+  xlim(0,400) + ylim(0,400) + theme_bw(base_size = global_size)  +
+  ylab('sensor evi2 full sesason duration (days)') + xlab('Mark evi2 full season duration (days)') + ggtitle('Full season duration comparison')
+
+
+site <- weeding_sites[1]
+
+test_site_data <- data_after_weeding %>% filter(Location == plot_site)
+test_site_data$date <- as_date(test_site_data$date)
+test_site_data$evi2_pad_fitted <- as.numeric(test_site_data$evi2_pad_fitted)
+test_site_data$evi2<- as.numeric(test_site_data$evi2)
+
+test_site_data$s2_evi2_fitted <- as.numeric(test_site_data$s2_evi2_fitted)
+test_site_data$s2_evi2<- as.numeric(test_site_data$s2_evi2)
+test_site_data$VIIRS_sr_evi2_fitted <- as.numeric(test_site_data$VIIRS_sr_evi2_fitted)
+test_site_data$VIIRS_sr_evi2<- as.numeric(test_site_data$VIIRS_sr_evi2)
+
+vars_to_rescale <- c('s2_evi2', 'evi2', 'evi2_pad', 'VIIRS_sr_evi2',
+                     's2_evi2_fitted', 'evi2_pad_fitted', 'VIIRS_sr_evi2_fitted')
+
+for (var in vars_to_rescale){
+  test_site_data[[var]] <- rescaleVect(test_site_data[[var]])
+}
+
+
+mark_evi2_dates <- all_sites[all_sites$Location == plot_site, 
+                        c("evi2_G_trs", "evi2_M_trs", "evi2_S_trs", "evi2_D_trs")] %>% as.matrix() %>% as.vector() %>% as_date()
+s2_evi2_dates <- all_sites[all_sites$Location == plot_site, 
+                        c("s2_evi2_G_trs", "s2_evi2_M_trs", "s2_evi2_S_trs", "s2_evi2_D_trs")]%>% as.matrix() %>% as.vector() %>% as_date()
+viirs_evi2_dates <- all_sites[all_sites$Location == plot_site, 
+                        c("VIIRS_sr_evi2_G_trs", "VIIRS_sr_evi2_M_trs", "VIIRS_sr_evi2_S_trs", "VIIRS_sr_evi2_D_trs")]%>% as.matrix() %>% as.vector() %>% as_date()
+
+
+test_site_data_long = pivot_longer(test_site_data,
+                                   cols = c(evi2_pad_fitted, s2_evi2_fitted, VIIRS_sr_evi2_fitted))
+
+new_names <- c("evi2_pad_fitted" = "Mark EVI2" ,
+              "s2_evi2_fitted" = "Sentinel-2 EVI2" ,
+               "VIIRS_sr_evi2_fitted" = "VIIRS EVI2")
+test_site_data_long$name <- new_names[test_site_data_long$name]
+
+raw_data_long <- pivot_longer(test_site_data,
+                                   cols = c(evi2_pad, s2_evi2, VIIRS_sr_evi2))
+
+new_names <- c( "evi2_pad" = "Mark EVI2",
+               "s2_evi2" = "Sentinel-2 EVI2",
+              "VIIRS_sr_evi2" = "VIIRS EVI2" )
+raw_data_long$name <- new_names[raw_data_long$name]
+
+colors <- c("Mark EVI2" = "orange",
+          "Sentinel-2 EVI2" = "green",
+          "VIIRS EVI2" = "blue")
+
+site_index <- which(all_sites$Location == plot_site)
+
+mark_lsp_dates <- c(all_sites$evi2_G_trs[plot_site_index],
+               all_sites$evi2_M_trs[plot_site_index],
+               all_sites$evi2_S_trs[plot_site_index],
+               all_sites$evi2_D_trs[plot_site_index])
+mark_lsp <- test_site_data %>% filter(date %in% mark_lsp_dates)
+mark_lsp$LSP_label <- c("G", "M", "S", "D")
+
+s2_lsp_dates <- c(all_sites$s2_evi2_G_trs[plot_site_index],
+               all_sites$s2_evi2_M_trs[plot_site_index],
+               all_sites$s2_evi2_S_trs[plot_site_index],
+               all_sites$s2_evi2_D_trs[plot_site_index])
+s2_lsp <- test_site_data %>% filter(date %in% s2_lsp_dates)
+s2_lsp$LSP_label <- c("G", "M", "S", "D")
+
+viirs_lsp_dates <- c(all_sites$VIIRS_sr_evi2_G_trs[plot_site_index],
+               all_sites$VIIRS_sr_evi2_M_trs[plot_site_index],
+               all_sites$VIIRS_sr_evi2_S_trs[plot_site_index],
+               all_sites$VIIRS_sr_evi2_D_trs[plot_site_index])
+viirs_lsp <- test_site_data %>% filter(date %in% viirs_lsp_dates)
+viirs_lsp$LSP_label <- c("G", "M", "S", "D")
+
+p2 <- ggplot(data = test_site_data_long) +
+  geom_point(data = raw_data_long, aes(x = date, y = value, color = name), alpha = 0.5) +
+  geom_line(aes(x = date, y= value, color = name), alpha = 0.5) + 
+  theme_bw() +ylim(0,1) + scale_color_manual(values = colors) +
+  ylab("Rescaled EVI2") + ggtitle(paste0("Multi-sensor LSP comparison")) +
+  geom_point(data = mark_lsp, aes(x = date, y = evi2_pad_fitted), size = 5, color = "orange") +
+  geom_point(data = s2_lsp, aes(x = date, y = s2_evi2_fitted), size = 5, color = "green") +
+  geom_point(data = viirs_lsp, aes(x = date, y = VIIRS_sr_evi2_fitted), size = 5, color = "blue", alpha = 0.5) +
+  geom_text(data = mark_lsp, aes(x = date, y = evi2_pad_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+  geom_text(data = s2_lsp, aes(x = date, y = s2_evi2_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+  geom_text(data = viirs_lsp, aes(x = date, y = VIIRS_sr_evi2_fitted, label = LSP_label), size = 4,  fontface = "bold", color = "white") +
+  guides(color = guide_legend(title = "Sensor VI"))
+
+
+
+
+
+
+
+png('GtoD_scatter_mark_satellite.png', width = 600, height = 600)
+p1
+dev.off()
+
+png('GtoD_example_mark_satellite.png', width = 600, height = 600)
+p2
+dev.off()
+```
+
+
+# Kenya split (Supp)
+
+# Figure 5, or other illustrative figure of results showing time-series 
+# make sure to justify selection of plot_site... it should match the offsets in sub-season duration... 
+
+# Arable bands
+
+# identify subjective parts, like Kenya splitting season... talk to Lyndon
+
+
+
+

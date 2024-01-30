@@ -1,0 +1,644 @@
+---
+title: "Pod work"
+author: "Mike Cecil"
+date: "2023-07-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Multi-sensor LSP extraction fitting
+
+This script performs the following processing steps
+- Rescales variables for use in random forest model
+- Creates two random forest models (using S1, S2, VIIRS as input variables and Mark EVI2 as output). 
+- The variable inputs are the rough-fit versions of the VI curves, after Whittaker smoothing but before fine-fit Beck smoothing. The variable names are '_pad_fitted' (for Mark) and '_fitted' (for satellite)
+- The random forests are created using the ranger package. For each group of sites, the model is trained only on sites not in the current group (to avoid over-fitting)
+- This script also calculates mean and median LSP dates based on LSP dates from S1, S2, VIIRS. 
+
+```{r}
+library(dplyr)
+#library(randomForest)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(Rcpp)
+library(phenofit)
+library(zoo)
+library(here)
+library(terra)
+library(scorepeak)
+library(ranger)
+library(pspline)
+library(lmodel2)
+
+```
+
+
+```{r}
+fit_var <- function(df, colName, lambda, w_colName = NA, weights = F){
+  fitted_vi_col_name <- paste0(colName, "_fitted")
+  y_all <- df[[colName]] 
+  #  print(y_all)
+  y_all[is.infinite(y_all)] <- -9999
+  y_all[is.na(y_all)] <- -9999
+  if(weights == T ){
+    w <- df[[w_colName]]
+  } else {
+    w <- (y_all != -9999)
+  }
+  y_whit <- whit2(y_all, lambda, w)
+  #  print(y_whit)
+  df[[fitted_vi_col_name]] <- y_whit
+  return(df)
+}
+
+get_bit <- function(number, n) {
+  bit <- (number %% 2^(n + 1)) %/% (2^(n))
+  return(bit)
+}
+
+
+
+calculate_Beck_plot_return_dates_rf <- function(df, 
+                                                vi_col,
+                                                vi_col_fitted,
+                                                pred_col,
+                                                pred_col_fitted,
+                                                mark_lsp_dates,
+                                                location){
+  
+  mark_lsp_dates <- as_date(mark_lsp_dates)
+  
+  df[['ndvi_pad']] <- df[[vi_col]]
+  df[['ndvi_pad_fitted']] <- df[[vi_col_fitted]]
+
+  df[['predict']] <- df[[pred_col]]
+  df[['predict_fitted']] <- df[[pred_col_fitted]]
+  
+  
+  max_vi <- max(df$ndvi_pad_fitted, na.rm = T)
+  # ## Beck fit
+  ndvi_col <- pred_col_fitted
+  finefit_mark <- FitDL.Beck(df[[ndvi_col]])
+  models_mark <- curvefit(df[[ndvi_col]], methods = 'Beck')
+  #dates_indices_mark <- PhenoKl(models_mark$model$Beck, IsPlot = F)
+  
+  dates_indices_mark_15 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.15))
+  dates_indices_mark_90 <- PhenoTrs(models_mark$model$Beck, IsPlot = F,
+                                 trs = c(0.90))
+  dates_indices_mark <- c(dates_indices_mark_15[1], 
+                          dates_indices_mark_90[1],
+                          dates_indices_mark_90[2],
+                          dates_indices_mark_15[2])
+  
+  
+  dates_mark <- df$date[dates_indices_mark]
+  dates_collapse_mark <- dates_mark %>% as.character() %>% paste(collapse = ' ')
+  ndvi_beck <- finefit_mark$zs$iter2
+  df$ndvi_beck <- ndvi_beck
+  
+
+  
+  
+  # colors <- c(`good` = 'green',
+  #            `maybe` = 'yellow4',
+  #            `no` = 'red')
+  
+  
+ # print(finefit_mark)
+#  print(models_mark)
+ # print(ndvi_beck)
+  p <- ggplot(df) +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'green') +
+  #  geom_point(aes(x = date, y = ndvi_pad), col = 'red', alpha = 0.5) +
+    geom_point(aes(x = date, y = ndvi_pad, col = 'red'), alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_pad_fitted, col = 'red'), alpha = 0.5) +
+
+
+    geom_point(aes(x = date, y = predict), col = 'blue', alpha = 0.5) +
+    geom_line(aes(x = date, y = predict_fitted), col = 'blue', alpha = 0.5) +
+    geom_line(aes(x = date, y = ndvi_beck), col = 'grey') + 
+    theme_bw() +
+    ylim(0, (1.1 * max_vi) ) + 
+    ylab(vi_col) +
+    geom_vline(xintercept= dates_mark[1], linetype="solid", lwd = 2, color = "lightgreen") +
+    geom_vline(xintercept= dates_mark[2], linetype="solid", lwd = 2, color = "darkgreen") +
+    geom_vline(xintercept= dates_mark[3], linetype="solid", lwd = 2, color = "yellow2") +
+    geom_vline(xintercept= dates_mark[4], linetype="solid", lwd = 2, color = "orange3") +
+    geom_vline(xintercept= mark_lsp_dates[1], linetype="dashed", lwd = 2, color = "lightgreen") +
+    geom_vline(xintercept= mark_lsp_dates[2], linetype="dashed", lwd = 2, color = "darkgreen") +
+    geom_vline(xintercept= mark_lsp_dates[3], linetype="dashed", lwd = 2, color = "yellow2") +
+    geom_vline(xintercept= mark_lsp_dates[4], linetype="dashed", lwd = 2, color = "orange3") +
+  #  geom_vline(xintercept = maxima_dates, linetype = 'solid', color = 'orange', lwd = 2) +
+ #   geom_vline(xintercept = minima_dates, linetype = 'solid', color = 'purple', lwd = 2) +
+    
+    ggtitle(paste0(location, ' ', dates_collapse_mark))
+#  plot(p)
+  print(p)
+ # return(finefit_mark)
+  return(list(p, dates_mark))
+  
+}
+
+rescaleVect <- function(columnVect){
+  columnVect <- as.numeric(columnVect)
+  min_vect <- min(columnVect, na.rm = T)
+  max_vect <- max(columnVect, na.rm = T)
+  transformedVect <- (columnVect - min_vect) * (0.8/(max_vect - min_vect)) + 0.1
+}
+
+
+ 
+```
+
+
+
+
+
+
+
+```{r}
+load(file = here('data/all_sites_post_mgmt.rda'))
+load(file = here('data/data_post_VIIRS_sr_fit.rda'))
+
+```
+
+
+
+```{r}
+## set LSP dates to NA due to quality check
+
+sites_quality_check <- read.csv(here("all_sites_quality_check_trs_AFTER.csv"))
+all_sites <- merge(all_sites, 
+                   sites_quality_check %>% select(Location, 
+                                                  G_keep_post,
+                                                  M_keep_post,
+                                                  S_keep_post,
+                                                  D_keep_post),
+                   by = "Location" )
+
+all_sites[all_sites$G_keep_post == FALSE, 'evi2_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'evi2_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'evi2_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'evi2_D_trs'] <- NA
+
+all_sites[all_sites$G_keep_post == FALSE, 'ndvi_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'ndvi_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'ndvi_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'ndvi_D_trs'] <- NA
+
+all_sites[all_sites$G_keep_post == FALSE, 'gcvi_G_trs'] <- NA
+all_sites[all_sites$M_keep_post == FALSE, 'gcvi_M_trs'] <- NA
+all_sites[all_sites$S_keep_post == FALSE, 'gcvi_S_trs'] <- NA
+all_sites[all_sites$D_keep_post == FALSE, 'gcvi_D_trs'] <- NA
+```
+
+
+```{r}
+
+#all_sites <- all_sites %>% distinct()
+
+
+## Sentinel-1 stopped covering Zambia in 2021-22, so set LSP values to NA
+all_sites[grepl('21-22', all_sites$Location), grepl('GEE_s1_', names(all_sites)) ] <- NA
+
+
+all_sites$start_date_mark <- sapply(1:NROW(all_sites), function(x){
+  current_site <- all_sites$Location[x]
+  current_df <- data %>% filter(Location == current_site) %>% filter(!is.na(evi2_pad))
+  min_date <- min(current_df$date) %>% as.character()
+})
+
+
+
+
+## fixing s2 column names for daily data
+cont_vct <- all_sites$group_cont
+names(cont_vct) <- all_sites$Location
+
+data$group_cont <- cont_vct[data$Location]
+
+s2_cols <- names(data)[substr(names(data), 1, 7) == 'DEA_s2_']
+for(s2_col in s2_cols){
+  new_col_name <- str_replace(s2_col, 'DEA_s2_', 's2_')
+  data[[new_col_name]] <- ifelse(data$group_cont == 'SSA', 
+                           as.character(data[[paste0('DEA_', new_col_name)]]),
+                           data[[s2_col]])
+  data[[new_col_name]] <- data[[new_col_name]] %>% as.numeric()
+}
+
+
+
+
+
+```
+
+
+
+
+
+```{r}
+#rescale variables for use in random forest
+mark_bands_to_rescale <- c("ndvi_pad_fitted",
+                           "gcvi_pad_fitted" ,
+                           "evi2_pad_fitted" )
+s1_bands_to_rescale <- c("GEE_s1_A_vh_vv_gf_fitted" ,
+                         "GEE_s1_A_rvi_gf_fitted" )
+s2_bands_to_rescale_dea <- c("DEA_s2_ndvi_fitted" ,
+                             "DEA_s2_gcvi_fitted" ,
+                             "DEA_s2_evi2_fitted" )
+s2_bands_to_rescale_gee <- c("s2_ndvi_fitted",
+                             "s2_gcvi_fitted",
+                             "s2_evi2_fitted")
+
+viirs_bands_to_rescale_gee <- c("VIIRS_sr_ndvi_fitted",
+                                      "VIIRS_sr_gcvi_fitted",
+                                      "VIIRS_sr_savi_fitted",
+                                      "VIIRS_sr_evi2_fitted")
+
+#all_sites$s2_source <- NA
+
+rescaled_dfs <- lapply(1:nrow(all_sites), function(k){
+  location <- all_sites$Location[k]
+  #print(location)
+  current_df <- data %>% filter(Location == location)
+
+  
+  for(band_to_rescale in c(mark_bands_to_rescale,
+                           s1_bands_to_rescale,
+                           s2_bands_to_rescale_gee,
+                           viirs_bands_to_rescale_gee)){
+   # print(band_to_rescale)
+    current_df[[paste0(band_to_rescale, "_std")]] <- rescaleVect(current_df[[band_to_rescale]])
+  }
+  
+  current_df <- current_df %>% filter(!is.na(ndvi_pad_fitted))
+  
+  bands_to_spline <- paste0(c(mark_bands_to_rescale,
+                           s1_bands_to_rescale,
+                           s2_bands_to_rescale_gee,
+                           viirs_bands_to_rescale_gee), '_std')
+  for(band_to_spline in bands_to_spline){
+    current_df[[paste0(band_to_spline, "_spline")]] <- 10 * predict(sm.spline(current_df$date,
+                                       current_df[[band_to_spline]]), 
+                             current_df$date, 1) %>% as.numeric()
+  }
+  return(current_df)
+  
+  
+})
+
+
+rescaled_dfs_rbind <- do.call('rbind', rescaled_dfs)
+
+
+ 
+```
+
+
+
+
+
+
+
+## ranger
+
+```{r}
+all_sites$evi2_valid_lsp_count <- sapply(1:nrow(all_sites), function(x){
+  l1 <- !(is.na(all_sites$evi2_G_trs[x]))
+  l2 <- !(is.na(all_sites$evi2_M_trs[x]))
+  l3 <- !(is.na(all_sites$evi2_S_trs[x]))
+  l4 <- !(is.na(all_sites$evi2_D_trs[x]))
+  l <- l1 + l2 + l3 + l4
+})
+```
+
+
+
+## ranger without spline
+```{r}
+groups <- all_sites$Group %>% unique()
+groups <- groups[groups != 'Zam_21_22']
+groups <- groups[groups %in% c("choma" ,
+                               "Zam_20_21"  ,    
+                               "kenya"  )]
+#groups <- groups[groups!= 'planet_stockton']
+
+dep_var <- "evi2_pad_fitted_std"
+dep_var_base <- str_replace(dep_var, '_pad_fitted_std', '')
+
+vi_col <- paste0(dep_var_base, '_pad')
+vi_col_fitted <- paste0(dep_var_base, '_pad_fitted')
+pred_col <- paste0(dep_var_base, '_predict')
+pred_col_fitted <- paste0(dep_var_base, '_predict_fitted')
+
+all_sites[[paste0(pred_col, '_G_trs')]] <- NA
+all_sites[[paste0(pred_col, '_M_trs')]] <- NA
+all_sites[[paste0(pred_col, '_S_trs')]] <- NA
+all_sites[[paste0(pred_col, '_D_trs')]] <- NA
+
+
+
+indep_var <- c("GEE_s1_A_vh_vv_gf_fitted_std" ,
+               "GEE_s1_A_rvi_gf_fitted_std" ,
+               "s2_ndvi_fitted_std" ,
+               "s2_gcvi_fitted_std"   ,
+               "s2_evi2_fitted_std"   ,
+               "VIIRS_sr_evi2_fitted_std",
+               "VIIRS_sr_gcvi_fitted_std" ,
+               "VIIRS_sr_ndvi_fitted_std"  )
+
+
+sites_bad_lsp <- all_sites[all_sites$evi2_valid_lsp_count < 3, 'Location']
+
+## remove Zambia 21-22 sites from both training and validation
+## remove sites with less than 3 valid Mark LSP dates from training only
+sites_remove <-  all_sites$Location[grepl('21-22', all_sites$Location)]
+sites_bad_lsp <- all_sites[all_sites$evi2_valid_lsp_count < 3, 'Location']
+sites_remove_train <- c(sites_remove, sites_bad_lsp)
+
+
+
+
+pdf('rf_plots.pdf')
+
+for(group in groups){
+  print(group)
+  train_sites <- all_sites %>% filter(Group != group) %>% pull(Location)
+  val_sites <- all_sites %>% filter(Group == group) %>% pull(Location)
+
+  train_sites <- train_sites[!(train_sites %in% sites_remove_train)]
+  val_sites <- val_sites[!(val_sites %in% sites_remove)]
+  
+  # print('train sites')
+  # print(train_sites)
+  # print('val sites')
+  # print(val_sites)
+  
+  train_data <- rescaled_dfs_rbind %>% filter(Location %in% train_sites)
+  val_data <- rescaled_dfs_rbind %>% filter(Location %in% val_sites)
+
+
+
+  train_data <- train_data[, c(dep_var, indep_var)]
+  train_data$dep_var <- train_data[[dep_var]]
+  train_data[[dep_var]] <- NULL
+  rf <- ranger(dep_var ~ ., data = train_data, write.forest = TRUE)
+
+  val_data$dep_var <- val_data[[dep_var]]
+  val_data$dep_var_fitted <- val_data[[paste0(dep_var, '_fitted')]]
+
+
+  val_data[[paste0(dep_var_base, '_predict')]] <- predict(rf, data = val_data)[['predictions']]
+  
+
+  
+  for(val_site in val_sites){
+    print(val_site)
+    current_df <- val_data %>% filter(Location == val_site)
+    current_df <- fit_var(current_df, paste0(dep_var_base, '_predict'), lambda = 10000)
+    val_site_i <- which(all_sites$Location == val_site)
+    mark_lsp_dates <- c(all_sites[[paste0(dep_var_base, '_G_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_M_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_S_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_D_trs')]][val_site_i])
+    
+    
+
+    
+    a <- calculate_Beck_plot_return_dates_rf(current_df, 
+                                             vi_col,
+                                          vi_col_fitted,
+                                          pred_col,
+                                          pred_col_fitted,
+                                          mark_lsp_dates,
+                                          val_site)
+    
+    
+    
+    all_sites[[paste0(pred_col, '_G_trs')]][val_site_i] <- a[[2]][1] %>% as.character()
+    all_sites[[paste0(pred_col, '_M_trs')]][val_site_i] <- a[[2]][2] %>% as.character()
+    all_sites[[paste0(pred_col, '_S_trs')]][val_site_i] <- a[[2]][3] %>% as.character()
+    all_sites[[paste0(pred_col, '_D_trs')]][val_site_i] <- a[[2]][4] %>% as.character()
+    
+  }
+}
+
+dev.off()
+
+
+```
+
+
+
+## ranger spline
+
+```{r}
+groups <- all_sites$Group %>% unique()
+groups <- groups[groups != 'Zam_21_22']
+groups <- groups[groups %in% c("choma" ,
+                               "Zam_20_21"  ,    
+                               "kenya"  )]
+#groups <- groups[groups!= 'planet_stockton']
+
+dep_var <- "evi2_pad_fitted_std"
+dep_var_base <- str_replace(dep_var, '_pad_fitted_std', '')
+
+vi_col <- paste0(dep_var_base, '_pad')
+vi_col_fitted <- paste0(dep_var_base, '_pad_fitted')
+pred_col <- paste0(dep_var_base, '_predict')
+pred_col_fitted <- paste0(dep_var_base, '_predict_fitted')
+
+all_sites[[paste0(pred_col, '_spline_G_trs')]] <- NA
+all_sites[[paste0(pred_col, '_spline_M_trs')]] <- NA
+all_sites[[paste0(pred_col, '_spline_S_trs')]] <- NA
+all_sites[[paste0(pred_col, '_spline_D_trs')]] <- NA
+
+
+
+indep_var <- c("GEE_s1_A_vh_vv_gf_fitted_std" ,
+               "GEE_s1_A_rvi_gf_fitted_std" ,
+               "s2_ndvi_fitted_std" ,
+               "s2_gcvi_fitted_std"   ,
+               "s2_evi2_fitted_std"   ,
+               "VIIRS_sr_ndvi_fitted_std",
+               "VIIRS_sr_gcvi_fitted_std" ,
+               "VIIRS_sr_evi2_fitted_std"  )
+
+indep_var_spline <- paste0(indep_var, '_spline')
+
+indep_var <- c(indep_var, 
+               indep_var_spline)
+
+
+## remove Zambia 21-22 sites from both training and validation
+## remove sites with less than 3 valid Mark LSP dates from training only
+sites_remove <-  all_sites$Location[grepl('21-22', all_sites$Location)]
+sites_bad_lsp <- all_sites[all_sites$evi2_valid_lsp_count < 3, 'Location']
+sites_remove_train <- c(sites_remove, sites_bad_lsp)
+
+
+
+
+pdf('rf_plots_spline.pdf')
+
+for(group in groups){
+  train_sites <- all_sites %>% filter(Group != group) %>% pull(Location)
+  val_sites <- all_sites %>% filter(Group == group) %>% pull(Location)
+  train_sites <- train_sites[!(train_sites %in% sites_remove_train)]
+  val_sites <- val_sites[!(val_sites %in% sites_remove)]
+  
+  train_data <- rescaled_dfs_rbind %>% filter(Location %in% train_sites)
+  val_data <- rescaled_dfs_rbind %>% filter(Location %in% val_sites)
+
+
+
+  train_data <- train_data[, c(dep_var, indep_var)]
+  train_data$dep_var <- train_data[[dep_var]]
+  train_data[[dep_var]] <- NULL
+  rf <- ranger(dep_var ~ ., data = train_data, write.forest = TRUE)
+
+  val_data$dep_var <- val_data[[dep_var]]
+  val_data$dep_var_fitted <- val_data[[paste0(dep_var, '_fitted')]]
+
+
+  val_data[[paste0(dep_var_base, '_predict')]] <- predict(rf, data = val_data)[['predictions']]
+  
+
+  
+  for(val_site in val_sites){
+    print(val_site)
+    current_df <- val_data %>% filter(Location == val_site)
+    current_df <- fit_var(current_df, paste0(dep_var_base, '_predict'), lambda = 10000)
+    val_site_i <- which(all_sites$Location == val_site)
+    mark_lsp_dates <- c(all_sites[[paste0(dep_var_base, '_G_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_M_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_S_trs')]][val_site_i],
+                   all_sites[[paste0(dep_var_base, '_D_trs')]][val_site_i])
+    
+    
+
+    
+    a <- calculate_Beck_plot_return_dates_rf(current_df, 
+                                             vi_col,
+                                          vi_col_fitted,
+                                          pred_col,
+                                          pred_col_fitted,
+                                          mark_lsp_dates,
+                                          val_site)
+    
+    
+    
+    all_sites[[paste0(pred_col, '_spline_G_trs')]][val_site_i] <- a[[2]][1] %>% as.character()
+    all_sites[[paste0(pred_col, '_spline_M_trs')]][val_site_i] <- a[[2]][2] %>% as.character()
+    all_sites[[paste0(pred_col, '_spline_S_trs')]][val_site_i] <- a[[2]][3] %>% as.character()
+    all_sites[[paste0(pred_col, '_spline_D_trs')]][val_site_i] <- a[[2]][4] %>% as.character()
+    
+  }
+}
+
+dev.off()
+
+
+```
+
+
+
+## satellite mean and median 
+```{r}
+all_sites$satellite_mean_G_trs <- rowMeans(cbind(as_date(all_sites$DEA_s2_ndvi_G_trs),
+                                   as_date(all_sites$DEA_s2_evi2_G_trs),
+                                   as_date(all_sites$DEA_s2_gcvi_G_trs),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_G_trs),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_G_trs),
+                                   as_date(all_sites$VIIRS_sr_ndvi_G_trs),
+                                   as_date(all_sites$VIIRS_sr_evi2_G_trs),
+                                   as_date(all_sites$VIIRS_sr_gcvi_G_trs)), 
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_mean_M_trs <- rowMeans(cbind(as_date(all_sites$DEA_s2_ndvi_M_trs),
+                                   as_date(all_sites$DEA_s2_evi2_M_trs),
+                                   as_date(all_sites$DEA_s2_gcvi_M_trs),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_M_trs),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_M_trs),
+                                   as_date(all_sites$VIIRS_sr_ndvi_M_trs),
+                                   as_date(all_sites$VIIRS_sr_evi2_M_trs),
+                                   as_date(all_sites$VIIRS_sr_gcvi_M_trs)), 
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_mean_S_trs <- rowMeans(cbind(as_date(all_sites$DEA_s2_ndvi_S_trs),
+                                   as_date(all_sites$DEA_s2_evi2_S_trs),
+                                   as_date(all_sites$DEA_s2_gcvi_S_trs),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_S_trs),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_S_trs),
+                                   as_date(all_sites$VIIRS_sr_ndvi_S_trs),
+                                   as_date(all_sites$VIIRS_sr_evi2_S_trs),
+                                   as_date(all_sites$VIIRS_sr_gcvi_S_trs)), 
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_mean_D_trs <- rowMeans(cbind(as_date(all_sites$DEA_s2_ndvi_D_trs),
+                                   as_date(all_sites$DEA_s2_evi2_D_trs),
+                                   as_date(all_sites$DEA_s2_gcvi_D_trs),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_D_trs),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_D_trs),
+                                   as_date(all_sites$VIIRS_sr_ndvi_D_trs),
+                                   as_date(all_sites$VIIRS_sr_evi2_D_trs),
+                                   as_date(all_sites$VIIRS_sr_gcvi_D_trs)), 
+                                   na.rm = T) %>% as_date() 
+
+
+
+all_sites$satellite_median_G_trs <- apply(data.frame(as_date(all_sites$DEA_s2_ndvi_G_trs) %>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_evi2_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_gcvi_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_ndvi_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_evi2_G_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_gcvi_G_trs)%>% as.numeric()), 1, median,
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_median_M_trs <- apply(data.frame(as_date(all_sites$DEA_s2_ndvi_M_trs) %>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_evi2_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_gcvi_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_ndvi_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_evi2_M_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_gcvi_M_trs)%>% as.numeric()), 1, median,
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_median_S_trs <- apply(data.frame(as_date(all_sites$DEA_s2_ndvi_S_trs) %>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_evi2_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_gcvi_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_ndvi_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_evi2_S_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_gcvi_S_trs)%>% as.numeric()), 1, median,
+                                   na.rm = T) %>% as_date() 
+
+all_sites$satellite_median_D_trs <- apply(data.frame(as_date(all_sites$DEA_s2_ndvi_D_trs) %>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_evi2_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$DEA_s2_gcvi_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_rvi_gf_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$GEE_s1_A_vh_vv_gf_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_ndvi_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_evi2_D_trs)%>% as.numeric(),
+                                   as_date(all_sites$VIIRS_sr_gcvi_D_trs)%>% as.numeric()), 1, median,
+                                   na.rm = T) %>% as_date() 
+```
+
+
+```{r}
+save(all_sites, file = here('all_sites_post_rf_mean_median.rda'))
+save(data, file = here('data_post_rf_mean_median.rda'))
+```
+
+
+
