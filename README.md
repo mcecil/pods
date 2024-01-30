@@ -6,7 +6,7 @@
 2. Download VIIRS Land Cover Dynamics (LCD) data from Google Earth Engine (GEE) using "extract_gee_coll_LCD_download.ipynb". Data exported to .csv files for each year.
 3. Export VIIRS surface reflectance data from GEE using "extract_gee_coll_VIIRS.ipynb". Data is exported to.csv files.
 4. Download Sentinel-1 data from GEE using "extract_gee_coll_s1_download.ipynb". Perform LASSO filter using "sentinel_lasso.ipynb".
-5. Join data for different sources using "process_gee_rf.ipynb". Data is saved to "all_filt.csv".
+5. **(needs review) Join data for different sources using "join_pods_VIIRS.ipynb". Data is saved to "all_filt.csv".
 
 ## R
 
